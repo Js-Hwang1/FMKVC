@@ -99,9 +99,29 @@ class PerplexityBenchmark(BaseBenchmark):
         self.log(f"Loaded {len(self.dataset)} examples")
         self._is_setup = True
     
-    def _prepare_data(self, tokenizer) -> list[dict]:
+    def _prepare_data(self, tokenizer, method=None) -> list[dict]:
         """Prepare tokenized data for evaluation."""
-        # Concatenate all text
+        # Get model's max sequence length
+        # Try to get from method's model config first
+        max_seq_len = None
+        if method is not None and hasattr(method, 'model') and method.model is not None:
+            config = getattr(method.model, 'config', None)
+            if config is not None:
+                max_seq_len = getattr(config, 'max_position_embeddings', None)
+        
+        # Fall back to tokenizer's model_max_length
+        if max_seq_len is None:
+            max_seq_len = getattr(tokenizer, "model_max_length", None)
+        
+        # If still None or unreasonably large, use a safe default
+        if max_seq_len is None or max_seq_len > 1e6:
+            # Use self.max_length * 2 as a safe upper bound
+            max_seq_len = min(self.max_length * 2, 8192)
+        
+        # Ensure we don't exceed the model's actual limit
+        max_seq_len = min(max_seq_len, 8192)  # Cap at reasonable maximum
+        
+        # Get texts
         if "text" in self.dataset.column_names:
             texts = self.dataset["text"]
         elif "content" in self.dataset.column_names:
@@ -115,22 +135,40 @@ class PerplexityBenchmark(BaseBenchmark):
         if self.num_samples:
             texts = texts[:self.num_samples]
         
-        # Concatenate texts
-        full_text = "\n\n".join(texts)
+        self.log(f"Tokenizing {len(texts)} text samples (max_seq_len={max_seq_len})...")
         
-        self.log(f"Tokenizing {len(full_text):,} characters...")
+        # Tokenize each text separately to avoid exceeding model limits
+        # Then concatenate token sequences
+        all_token_ids = []
         
-        # Tokenize
-        encodings = tokenizer(
-            full_text,
-            return_tensors="pt",
-            truncation=False,
-        )
+        for text in texts:
+            # Tokenize with truncation to respect model limits
+            encodings = tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_seq_len,
+                add_special_tokens=True,
+            )
+            token_ids = encodings.input_ids[0].tolist()
+            
+            # Add separator tokens between texts (use EOS token if available)
+            if all_token_ids:  # Not the first text
+                eos_token_id = getattr(tokenizer, "eos_token_id", None)
+                if eos_token_id is not None:
+                    # Add separator tokens between texts
+                    all_token_ids.append(eos_token_id)
+                    all_token_ids.append(eos_token_id)
+            
+            all_token_ids.extend(token_ids)
         
-        # Create sliding window samples
-        input_ids = encodings.input_ids[0]
+        # Convert to tensor
+        input_ids = torch.tensor(all_token_ids, dtype=torch.long)
         total_len = len(input_ids)
         
+        self.log(f"Total tokenized length: {total_len:,} tokens")
+        
+        # Create sliding window samples
         samples = []
         for start_idx in range(0, total_len - self.max_length, self.stride):
             end_idx = start_idx + self.max_length
@@ -158,8 +196,8 @@ class PerplexityBenchmark(BaseBenchmark):
         
         self.log(f"Evaluating {method.name} on {self.dataset_name}")
         
-        # Prepare data with method's tokenizer
-        samples = self._prepare_data(method.tokenizer)
+        # Prepare data with method's tokenizer (pass method to get max_length)
+        samples = self._prepare_data(method.tokenizer, method=method)
         
         # Compute perplexity
         total_loss = 0.0

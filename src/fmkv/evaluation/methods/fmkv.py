@@ -137,15 +137,50 @@ class FMKVMethod(BaseMethod):
         
         # Determine window size from compression ratio or budget
         if self.config.compression_ratio is not None:
-            # e.g., ratio=0.5 means keep 50% of tokens
-            window_size = max(8, int(64 / self.config.compression_ratio))
-            # Estimate max_length based on compression ratio
-            # If we compress at ratio 0.5, we want cache to stay around 2x the compressed size
-            max_length = int(128 / self.config.compression_ratio) if self.config.compression_ratio > 0 else 128
+            # compression_ratio = fraction of tokens to KEEP (not compress away)
+            # compression_ratio = 0.5 means keep 50% of tokens (compress away 50%)
+            # compression_ratio = 0.1 means keep 10% of tokens (compress away 90%)
+            
+            # To achieve compression_ratio, we compress window_size tokens -> 1 token
+            # So: 1/window_size = compression_ratio, therefore window_size = 1/compression_ratio
+            # For ratio=0.5: window_size=2 (compress 2->1 = keep 50%)
+            # For ratio=0.1: window_size=10 (compress 10->1 = keep 10%)
+            # For ratio=0.05: window_size=20 (compress 20->1 = keep 5%)
+            
+            # However, Sidecar was trained on window_size=64, so we use that as base
+            # and adjust compression frequency instead
+            # For lower ratios, compress more frequently (smaller max_length)
+            base_window_size = 64  # Sidecar training window size
+            
+            # Calculate effective compression: compress every N tokens to achieve ratio
+            # If we compress window_size tokens -> 1 token every max_length tokens,
+            # effective ratio = (max_length - window_size + 1) / max_length
+            # For ratio=0.5: (max_length - 64 + 1) / max_length = 0.5
+            # Solving: max_length = 126 (compress when cache reaches 126)
+            # For ratio=0.1: max_length = 71 (compress more frequently)
+            
+            # Simplified: use fixed window_size=64, adjust max_length based on ratio
+            window_size = base_window_size
+            
+            # max_length: when to trigger compression
+            # Lower ratio = more aggressive compression = trigger earlier
+            # Target: after compression, cache size ≈ max_length * compression_ratio
+            # If we compress window_size->1 when cache reaches max_length:
+            #   After compression: cache_size = max_length - window_size + 1
+            #   We want: (max_length - window_size + 1) / max_length ≈ compression_ratio
+            #   Solving: max_length ≈ (window_size - 1) / (1 - compression_ratio)
+            if self.config.compression_ratio > 0 and self.config.compression_ratio < 1:
+                max_length = int((window_size - 1) / (1 - self.config.compression_ratio))
+            else:
+                max_length = 128
+            
+            # Clamp to reasonable range
+            max_length = max(window_size + 10, min(max_length, 2048))
+            
             self.compression_policy = WindowPolicy(
                 window_size=window_size,
                 max_length=max_length,
-                min_dense_tokens=32,
+                min_dense_tokens=max(8, window_size // 4),  # Keep at least some dense tokens
             )
         elif self.config.cache_budget is not None:
             # Use budget policy for fixed cache size
@@ -459,18 +494,31 @@ class FMKVMethod(BaseMethod):
                 chunk_labels = labels[:, start_idx:end_idx]
                 
                 # Shift labels to align with logits (next token prediction)
-                shift_logits = logits[:, :-1, :].contiguous()
-                shift_labels = chunk_labels[:, 1:].contiguous()
-                
-                # Compute cross-entropy loss
-                loss_fct = torch.nn.CrossEntropyLoss(reduction='sum')
-                chunk_loss = loss_fct(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1)
-                )
-                
-                total_loss += chunk_loss.item()
-                processed_tokens += (chunk_len - 1)  # -1 because of shifting
+                # Need at least 2 tokens to compute loss (1 for input, 1 for prediction)
+                if chunk_len >= 2:
+                    shift_logits = logits[:, :-1, :].contiguous()
+                    shift_labels = chunk_labels[:, 1:].contiguous()
+                    
+                    # Compute cross-entropy loss
+                    loss_fct = torch.nn.CrossEntropyLoss(reduction='sum')
+                    chunk_loss = loss_fct(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1)
+                    )
+                    
+                    total_loss += chunk_loss.item()
+                    processed_tokens += (chunk_len - 1)  # -1 because of shifting
+                elif chunk_len == 1 and past_key_values is not None:
+                    # Single token chunk with past: compute loss using past context
+                    # This is the last token, predict it from past
+                    logits_last = logits[:, -1, :]  # (batch, vocab_size)
+                    labels_last = chunk_labels[:, -1]  # (batch,)
+                    
+                    loss_fct = torch.nn.CrossEntropyLoss(reduction='sum')
+                    chunk_loss = loss_fct(logits_last, labels_last)
+                    
+                    total_loss += chunk_loss.item()
+                    processed_tokens += 1
                 
                 # Update cache
                 past_key_values = outputs.past_key_values
