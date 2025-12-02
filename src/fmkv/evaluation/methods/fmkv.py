@@ -52,7 +52,7 @@ class FMKVMethod(BaseMethod):
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
-            torch_dtype=self.config.torch_dtype_parsed,
+            dtype=self.config.torch_dtype_parsed,  # Use dtype instead of torch_dtype
             device_map=self.config.device,
             trust_remote_code=True,
         )
@@ -77,7 +77,13 @@ class FMKVMethod(BaseMethod):
         from fmkv.sidecar import Sidecar, SidecarConfig
         
         print(f"[FMKV] Loading Sidecar from: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.config.device)
+        # Set weights_only=False to allow custom classes (EncoderType, etc.)
+        # This is safe since we're loading our own checkpoints
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=self.config.device,
+            weights_only=False,
+        )
         
         # Load config
         config_dict = checkpoint.get("config", {})

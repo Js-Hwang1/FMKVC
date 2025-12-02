@@ -234,7 +234,7 @@ class GradientCache:
     def load(cls, path: Union[str, Path]) -> "GradientCache":
         """Load cached gradients from disk."""
         path = Path(path)
-        data = torch.load(path)
+        data = torch.load(path, weights_only=False)
         
         cache = cls(d_head=data["d_head"])
         

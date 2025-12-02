@@ -44,7 +44,7 @@ class DenseMethod(BaseMethod):
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
-            torch_dtype=self.config.torch_dtype_parsed,
+            dtype=self.config.torch_dtype_parsed,  # Use dtype instead of torch_dtype
             device_map=self.config.device,
             trust_remote_code=True,
         )

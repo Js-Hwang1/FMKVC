@@ -495,7 +495,7 @@ class SidecarTrainer:
     
     def _load_checkpoint(self, path: str):
         """Load a training checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         
         self.sidecar.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -538,7 +538,7 @@ def load_sidecar(
     Returns:
         Loaded Sidecar model
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device or "cpu")
+    checkpoint = torch.load(checkpoint_path, map_location=device or "cpu", weights_only=False)
     
     # Reconstruct config
     sidecar_config = SidecarConfig(**checkpoint["sidecar_config"])
