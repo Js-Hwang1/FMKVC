@@ -177,7 +177,9 @@ class SidecarTrainer:
         self.scheduler = None
         
         # Mixed precision
-        self.scaler = GradScaler() if config.mixed_precision else None
+        # Note: GradScaler only supports float16, not bfloat16
+        use_grad_scaler = config.mixed_precision and config.dtype == "float16"
+        self.scaler = GradScaler() if use_grad_scaler else None
         self.autocast_dtype = config.get_dtype()
         
         # Training state
