@@ -166,7 +166,7 @@ class InducedSetAttentionBlock(nn.Module):
         super().__init__()
         
         # Learnable inducing points
-        self.inducing_points = nn.Parameter(torch.randn(1, num_inducing, d_model) * 0.02)
+        self.inducing_points = nn.Parameter(torch.randn(1, num_inducing, d_model) * 0.5)
         
         # First attention: inducing points attend to input
         self.norm1 = nn.LayerNorm(d_model)
@@ -243,7 +243,7 @@ class PoolingByMultiheadAttention(nn.Module):
         self.num_outputs = num_outputs
         
         # Learnable seed vectors for pooling
-        self.seeds = nn.Parameter(torch.randn(1, num_outputs, d_model) * 0.02)
+        self.seeds = nn.Parameter(torch.randn(1, num_outputs, d_model) * 0.5)
         
         # Attention from seeds to input
         self.norm1 = nn.LayerNorm(d_model)
@@ -370,7 +370,7 @@ class AttentionPooling(nn.Module):
         d_model = config.encoder_hidden_dim
         
         # Learnable query vector
-        self.query = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.query = nn.Parameter(torch.randn(1, 1, d_model) * 0.5)
         
         # Attention
         self.attn = MultiHeadAttention(

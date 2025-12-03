@@ -92,8 +92,8 @@ class Sidecar(nn.Module):
         Initialize weights using Xavier/Glorot initialization with careful scaling.
         
         Bug #14 Fix: Properly detect and initialize output projection layers.
-        The previous fix didn't work because 'output_proj' wasn't in str(module).
-        Now we tag layers explicitly and use larger gains throughout.
+        Bug #17 Fix: Initialize aggregator parameters (seeds, inducing_points, query).
+        These were stuck at tiny values (* 0.02) causing zero outputs.
         """
         if isinstance(module, nn.Linear):
             # Check if this is tagged as final output layer
@@ -116,6 +116,18 @@ class Sidecar(nn.Module):
             nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=0.02)
+        
+        # Bug #17 Fix: Initialize aggregator learnable parameters
+        # Check for specific parameter names that need proper initialization
+        if hasattr(module, 'seeds'):
+            # PMA pooling seeds - use larger std to prevent collapse
+            nn.init.normal_(module.seeds, mean=0.0, std=0.5)
+        if hasattr(module, 'inducing_points'):
+            # ISAB inducing points - use larger std to prevent collapse
+            nn.init.normal_(module.inducing_points, mean=0.0, std=0.5)
+        if hasattr(module, 'query'):
+            # Attention pooling query - use larger std to prevent collapse
+            nn.init.normal_(module.query, mean=0.0, std=0.5)
     
     @property
     def num_parameters(self) -> int:
