@@ -80,9 +80,19 @@ class Sidecar(nn.Module):
         self._num_parameters = sum(p.numel() for p in self.parameters())
     
     def _init_weights(self, module: nn.Module):
-        """Initialize weights using Xavier/Glorot initialization."""
+        """
+        Initialize weights using Xavier/Glorot initialization with careful scaling.
+        
+        Bug #6 Fix: Improved initialization to prevent output collapse.
+        Using larger scale for output projection to ensure non-zero outputs.
+        """
         if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
+            # Use Xavier uniform with gain for better gradient flow
+            gain = 1.0
+            # For output projection, use larger gain to prevent vanishing outputs
+            if hasattr(module, '__name__') or 'output_proj' in str(module):
+                gain = 2.0
+            nn.init.xavier_uniform_(module.weight, gain=gain)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.LayerNorm):

@@ -6,6 +6,7 @@ Standard benchmarks:
 - Passkey Retrieval: Long-context retrieval accuracy
 - LongBench: Comprehensive long-context benchmark suite
 - Needle-in-Haystack: Single fact retrieval in long context
+- Force Validation: Explicit force-matching error measurement (Bug #10 fix)
 - Memory/Latency: Efficiency metrics
 """
 
@@ -14,6 +15,7 @@ from .perplexity import PerplexityBenchmark
 from .passkey import PasskeyRetrievalBenchmark
 from .needle import NeedleInHaystackBenchmark
 from .longbench import LongBenchBenchmark
+from .force_validation import ForceValidationBenchmark
 
 __all__ = [
     "BaseBenchmark",
@@ -22,6 +24,7 @@ __all__ = [
     "PasskeyRetrievalBenchmark",
     "NeedleInHaystackBenchmark",
     "LongBenchBenchmark",
+    "ForceValidationBenchmark",
     "get_benchmark",
     "list_benchmarks",
 ]
@@ -31,6 +34,7 @@ _BENCHMARK_REGISTRY = {
     "passkey": PasskeyRetrievalBenchmark,
     "needle": NeedleInHaystackBenchmark,
     "longbench": LongBenchBenchmark,
+    "force_validation": ForceValidationBenchmark,
 }
 
 

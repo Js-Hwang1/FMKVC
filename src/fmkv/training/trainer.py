@@ -396,6 +396,18 @@ class SidecarTrainer:
             with torch.amp.autocast(device_type="cuda", dtype=self.autocast_dtype, enabled=self.scaler is not None):
                 k_cg, v_cg = self.sidecar.compress_cache(keys, values)
                 
+                # Bug #6 Fix: Check for zero outputs
+                if self.global_step % 100 == 0:
+                    k_norm = k_cg.norm(dim=-1).mean().item()
+                    v_norm = v_cg.norm(dim=-1).mean().item()
+                    if k_norm < 1e-6 or v_norm < 1e-6:
+                        import warnings
+                        warnings.warn(
+                            f"Step {self.global_step}: Sidecar outputs near zero! "
+                            f"k_cg norm: {k_norm:.6f}, v_cg norm: {v_norm:.6f}. "
+                            f"This indicates vanishing gradients or bad initialization."
+                        )
+                
                 # Compute loss
                 loss, metrics = self.loss_fn(
                     queries=queries,
@@ -410,6 +422,18 @@ class SidecarTrainer:
             with autocast(enabled=self.scaler is not None):
                 k_cg, v_cg = self.sidecar.compress_cache(keys, values)
                 
+                # Bug #6 Fix: Check for zero outputs
+                if self.global_step % 100 == 0:
+                    k_norm = k_cg.norm(dim=-1).mean().item()
+                    v_norm = v_cg.norm(dim=-1).mean().item()
+                    if k_norm < 1e-6 or v_norm < 1e-6:
+                        import warnings
+                        warnings.warn(
+                            f"Step {self.global_step}: Sidecar outputs near zero! "
+                            f"k_cg norm: {k_norm:.6f}, v_cg norm: {v_norm:.6f}. "
+                            f"This indicates vanishing gradients or bad initialization."
+                        )
+                
                 # Compute loss
                 loss, metrics = self.loss_fn(
                     queries=queries,
@@ -418,6 +442,10 @@ class SidecarTrainer:
                     k_cg=k_cg,
                     v_cg=v_cg,
                 )
+        
+        # Add output norms to metrics for logging
+        metrics["output/k_cg_norm"] = k_cg.norm(dim=-1).mean().detach()
+        metrics["output/v_cg_norm"] = v_cg.norm(dim=-1).mean().detach()
         
         return loss, metrics
     

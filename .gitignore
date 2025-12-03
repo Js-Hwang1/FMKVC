@@ -1,2 +1,5 @@
 .DS_Store
 .venv/
+colab/
+BUGS_TO_FIX.txt
+FIXES_IMPLEMENTED.txt

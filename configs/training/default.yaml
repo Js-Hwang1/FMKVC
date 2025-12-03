@@ -14,10 +14,10 @@ max_steps: 100000
 batch_size: 32
 gradient_accumulation_steps: 1
 
-# Loss weights
+# Loss weights (Bug #8 Fix: Increased magnitude weight to prevent output collapse)
 force_matching_weight: 1.0
 consistency_weight: 0.1
-geometric_weight: 0.01
+output_magnitude_weight: 0.2  # Increased from 0.05 to 0.2
 
 # Regularization
 gradient_clip_norm: 1.0
@@ -42,7 +42,7 @@ wandb_tags: []
 num_workers: 4
 prefetch_factor: 2
 
-# Early stopping
-early_stopping_patience: 10
+# Early stopping (Bug #9 Fix: Increased patience to allow more training)
+early_stopping_patience: 20  # Increased from 10 to 20
 early_stopping_threshold: 1.0e-4
 

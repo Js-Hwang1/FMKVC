@@ -39,16 +39,16 @@ class ForceMatchingLossConfig:
     # Number of future queries to sample for force matching
     num_future_queries: int = 16
     
-    # Loss weighting
+    # Loss weighting (Bug #8 Fix: Increased magnitude weight)
     force_matching_weight: float = 1.0
     consistency_weight: float = 0.1
-    output_magnitude_weight: float = 0.05
+    output_magnitude_weight: float = 0.2  # Increased from 0.05 to prevent output collapse
     
     # Normalization
     normalize_jacobian: bool = True
     
-    # Gradient clipping for stability
-    jacobian_clip_value: Optional[float] = 10.0
+    # Gradient clipping for stability (Bug #6 Fix: Increased from 10.0)
+    jacobian_clip_value: Optional[float] = 50.0  # Increased to allow larger gradients
 
 
 class ForceMatchingLoss(nn.Module):
