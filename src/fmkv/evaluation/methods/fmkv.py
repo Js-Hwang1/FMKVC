@@ -130,7 +130,8 @@ class FMKVMethod(BaseMethod):
         # Create and load Sidecar
         self.sidecar = Sidecar(config)
         self.sidecar.load_state_dict(checkpoint["model_state_dict"])
-        self.sidecar.to(self.config.device)
+        # Bug #28 Fix: Convert both device AND dtype to match model
+        self.sidecar.to(device=self.config.device, dtype=self.config.torch_dtype_parsed)
         self.sidecar.eval()
         
         logger.info(f"Sidecar loaded successfully:")
