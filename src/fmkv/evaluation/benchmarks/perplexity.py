@@ -236,9 +236,20 @@ class PerplexityBenchmark(BaseBenchmark):
                 progress.set_postfix({"ppl": f"{current_ppl:.2f}"})
                 
             except Exception as e:
-                errors.append(f"Sample {sample['start_idx']}: {str(e)}")
+                import traceback
+                error_msg = f"Sample {sample['start_idx']}: {str(e)}"
+                errors.append(error_msg)
+                # Log first error with full traceback for debugging
+                if len(errors) == 1:
+                    self.log(f"ERROR in compute_loss: {error_msg}")
+                    self.log(f"Traceback: {traceback.format_exc()}")
                 continue
-        
+
+        # Log error summary if any
+        if errors:
+            self.log(f"WARNING: {len(errors)}/{len(samples)} samples failed!")
+            self.log(f"First error: {errors[0]}")
+
         # Compute final metrics
         if total_tokens > 0:
             avg_loss = total_loss / total_tokens

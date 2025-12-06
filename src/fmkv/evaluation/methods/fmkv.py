@@ -55,7 +55,7 @@ class FMKVMethod(BaseMethod):
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
-            dtype=self.config.torch_dtype_parsed,  # Use dtype instead of torch_dtype
+            torch_dtype=self.config.torch_dtype_parsed,
             device_map=self.config.device,
             trust_remote_code=True,
         )
@@ -300,10 +300,11 @@ class FMKVMethod(BaseMethod):
                     current_position = new_cache_len
 
                 # Compute position_id for this token
+                # Bug #24 Fix: Use next_token.device instead of self.model.device
                 position_ids = torch.tensor(
                     [[current_position]],
                     dtype=torch.long,
-                    device=self.model.device,
+                    device=next_token.device,
                 )
 
                 # Forward pass with new token
@@ -557,11 +558,14 @@ class FMKVMethod(BaseMethod):
             # The suffix tokens should have positions starting AFTER the compressed cache
             compressed_cache_len = compressed_kv[0][0].shape[2] if compressed_kv else 0
             suffix_len = suffix_ids.shape[1]
+            # Bug #24 Fix: Use input_ids.device instead of self.model.device
+            # (device_map may distribute model across devices)
+            device = input_ids.device
             position_ids = torch.arange(
                 compressed_cache_len,
                 compressed_cache_len + suffix_len,
                 dtype=torch.long,
-                device=self.model.device,
+                device=device,
             ).unsqueeze(0).expand(batch_size, -1)
 
             # Step 3: Forward pass on suffix using compressed cache
