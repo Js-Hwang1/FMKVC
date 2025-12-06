@@ -4,6 +4,7 @@ Force-Matched KV Cache Compression method.
 Our novel method using learned coarse-graining with force matching.
 """
 
+import logging
 import time
 from typing import Optional
 
@@ -11,6 +12,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .base import BaseMethod, GenerationOutput, MethodConfig
+
+logger = logging.getLogger(__name__)
 
 
 class FMKVMethod(BaseMethod):
@@ -40,7 +43,7 @@ class FMKVMethod(BaseMethod):
         if self._is_setup:
             return
         
-        print(f"[FMKV] Loading model: {self.config.model_name}")
+        logger.info(f"Loading model: {self.config.model_name}")
         
         # Load base model
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -63,20 +66,20 @@ class FMKVMethod(BaseMethod):
         if sidecar_path:
             self._load_sidecar(sidecar_path)
         else:
-            print("[FMKV] Warning: No Sidecar checkpoint provided, using untrained")
+            logger.warning("No Sidecar checkpoint provided, using untrained")
             self._init_default_sidecar()
         
         # Set up compression policy
         self._setup_compression_policy()
         
         self._is_setup = True
-        print(f"[FMKV] Setup complete. Compression ratio target: {self.config.compression_ratio}")
+        logger.info(f"Setup complete. Compression ratio target: {self.config.compression_ratio}")
     
     def _load_sidecar(self, checkpoint_path: str) -> None:
         """Load trained Sidecar from checkpoint."""
         from fmkv.sidecar import Sidecar, SidecarConfig
         
-        print(f"[FMKV] Loading Sidecar from: {checkpoint_path}")
+        logger.info(f"Loading Sidecar from: {checkpoint_path}")
         # Set weights_only=False to allow custom classes (EncoderType, etc.)
         # This is safe since we're loading our own checkpoints
         checkpoint = torch.load(
@@ -130,11 +133,11 @@ class FMKVMethod(BaseMethod):
         self.sidecar.to(self.config.device)
         self.sidecar.eval()
         
-        print(f"[FMKV] Sidecar loaded successfully:")
-        print(f"  - Parameters: {sum(p.numel() for p in self.sidecar.parameters()):,}")
-        print(f"  - Head dim: {config.d_head}")
-        print(f"  - Input dim: {config.input_dim} (K+V concatenated)")
-        print(f"  - Window size: {config.window_size}")
+        logger.info(f"Sidecar loaded successfully:")
+        logger.info(f"  - Parameters: {sum(p.numel() for p in self.sidecar.parameters()):,}")
+        logger.info(f"  - Head dim: {config.d_head}")
+        logger.info(f"  - Input dim: {config.input_dim} (K+V concatenated)")
+        logger.info(f"  - Window size: {config.window_size}")
     
     def _init_default_sidecar(self) -> None:
         """Initialize default (untrained) Sidecar for testing."""
@@ -192,8 +195,10 @@ class FMKVMethod(BaseMethod):
             # Clamp to reasonable range
             max_length = max(window_size + 10, min(max_length, 4096))
             
-            print(f"[FMKV] Compression policy: window_size={window_size} (fixed from training), "
-                  f"max_length={max_length} (trigger threshold)")
+            logger.info(
+                f"Compression policy: window_size={window_size} (fixed from training), "
+                f"max_length={max_length} (trigger threshold)"
+            )
             
             self.compression_policy = WindowPolicy(
                 window_size=window_size,

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from jaxtyping import Float
+from torch import Tensor
 
 from fmkv.losses.jacobian import (
     compute_attention_jacobian,
@@ -95,21 +97,21 @@ class ForceMatchingLoss(nn.Module):
     
     def compute_dense_jacobian(
         self,
-        queries: torch.Tensor,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        queries: Float[Tensor, "batch num_queries d_head"],
+        keys: Float[Tensor, "batch seq_len d_head"],
+        values: Float[Tensor, "batch seq_len d_head"],
+    ) -> Tuple[Float[Tensor, "batch d_head d_head"], Float[Tensor, "batch num_queries d_head"]]:
         """
         Compute the aggregate Jacobian for dense (uncompressed) attention.
-        
+
         For dense attention, we compute the Jacobian w.r.t. each key-value
         pair and sum them (representing total force from the window).
-        
+
         Args:
             queries: Shape (batch, num_queries, d_head)
             keys: Shape (batch, seq_len, d_head)
             values: Shape (batch, seq_len, d_head)
-        
+
         Returns:
             Tuple of:
                 - aggregate_jacobian: Shape (batch, d_head, d_head)
@@ -136,21 +138,21 @@ class ForceMatchingLoss(nn.Module):
     
     def compute_compressed_jacobian(
         self,
-        queries: torch.Tensor,
-        k_cg: torch.Tensor,
-        v_cg: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        queries: Float[Tensor, "batch num_queries d_head"],
+        k_cg: Float[Tensor, "batch *num_compressed d_head"],
+        v_cg: Float[Tensor, "batch *num_compressed d_head"],
+    ) -> Tuple[Float[Tensor, "batch d_head d_head"], Float[Tensor, "batch num_queries d_head"]]:
         """
         Compute the Jacobian for compressed attention.
-        
+
         Bug #19 Fix: k_cg and v_cg can now have multiple super-tokens (seq_len > 1).
         This makes attention non-trivial and Jacobian non-zero.
-        
+
         Args:
             queries: Shape (batch, num_queries, d_head)
             k_cg: Compressed keys, shape (batch, num_compressed, d_head) or (batch, d_head)
             v_cg: Compressed values, shape (batch, num_compressed, d_head) or (batch, d_head)
-        
+
         Returns:
             Tuple of:
                 - aggregate_jacobian: Shape (batch, d_head, d_head)

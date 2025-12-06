@@ -9,6 +9,7 @@ The hypothesis: Force-Matched compression achieves a better Pareto frontier
 (lower perplexity at higher compression ratios) compared to H2O.
 """
 
+import logging
 import math
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -201,34 +204,34 @@ class PerplexityEvaluator:
     
     def print_results(self, results: Dict[float, PerplexityResult]):
         """Print formatted perplexity results."""
-        print("\n" + "=" * 60)
-        print("PERPLEXITY VS COMPRESSION RATIO")
-        print("=" * 60)
-        
-        print(f"\n{'Ratio':<10} {'Effective':<12} {'PPL':<10} {'Loss':<10}")
-        print("-" * 42)
-        
+        logger.info("\n" + "=" * 60)
+        logger.info("PERPLEXITY VS COMPRESSION RATIO")
+        logger.info("=" * 60)
+
+        logger.info(f"\n{'Ratio':<10} {'Effective':<12} {'PPL':<10} {'Loss':<10}")
+        logger.info("-" * 42)
+
         for ratio in sorted(results.keys(), reverse=True):
             result = results[ratio]
-            print(
+            logger.info(
                 f"{ratio:<10.2f} "
                 f"{result.effective_context_length:<12d} "
                 f"{result.perplexity:<10.2f} "
                 f"{result.loss:<10.4f}"
             )
-        
-        print("=" * 60)
-        
+
+        logger.info("=" * 60)
+
         # Compute relative degradation
         if 1.0 in results:
             baseline_ppl = results[1.0].perplexity
-            print("\nRelative PPL increase from dense baseline:")
+            logger.info("\nRelative PPL increase from dense baseline:")
             for ratio in sorted(results.keys(), reverse=True):
                 if ratio < 1.0:
                     result = results[ratio]
                     increase = (result.perplexity - baseline_ppl) / baseline_ppl * 100
                     compression = 1 / ratio
-                    print(f"  {compression:.0f}x compression: +{increase:.1f}%")
+                    logger.info(f"  {compression:.0f}x compression: +{increase:.1f}%")
 
 
 def create_ppl_curve_data(

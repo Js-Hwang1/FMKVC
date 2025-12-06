@@ -2,6 +2,7 @@
 Base class for benchmarks.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -10,6 +11,8 @@ from typing import Any, Optional
 import torch
 
 from ..methods.base import BaseMethod
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -110,7 +113,7 @@ class BaseBenchmark(ABC):
     def log(self, message: str) -> None:
         """Log a message if verbose."""
         if self.verbose:
-            print(f"[{self.name}] {message}")
+            logger.info(f"[{self.name}] {message}")
     
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name={self.name})"

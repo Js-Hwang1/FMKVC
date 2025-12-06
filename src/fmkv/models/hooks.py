@@ -11,12 +11,15 @@ These hooks enable:
 3. Injecting compressed KV states during inference
 """
 
+import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 import weakref
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,7 +118,7 @@ class KVCacheHook:
             try:
                 attn_module = self._get_module_by_name(self.model, layer_name)
             except AttributeError:
-                print(f"Warning: Could not find attention module at {layer_name}")
+                logger.warning(f"Could not find attention module at {layer_name}")
                 continue
             
             # Register forward hook

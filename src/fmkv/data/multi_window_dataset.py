@@ -11,6 +11,7 @@ windows, we simulate the real inference scenario with multiple compressed
 super-tokens.
 """
 
+import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 import random
@@ -19,6 +20,8 @@ import torch
 from torch.utils.data import Dataset
 
 from fmkv.data.trajectory import TrajectoryWindow, load_trajectories
+
+logger = logging.getLogger(__name__)
 
 
 class MultiWindowDataset(Dataset):
@@ -89,8 +92,9 @@ class MultiWindowDataset(Dataset):
                 if len(window_group) == num_windows_per_sample:
                     self.groups.append(window_group)
         
-        print(f"[MultiWindowDataset] Created {len(self.groups)} groups of "
-              f"{num_windows_per_sample} windows each")
+        logger.info(
+            f"Created {len(self.groups)} groups of {num_windows_per_sample} windows each"
+        )
     
     @classmethod
     def from_trajectories(

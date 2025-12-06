@@ -15,10 +15,11 @@ Example:
               The passkey is: 847392
               [... more filler text ...]
               What is the passkey?"
-    
+
     Expected answer: "847392"
 """
 
+import logging
 import random
 import re
 from typing import Dict, List, Optional, Tuple
@@ -26,6 +27,8 @@ from dataclasses import dataclass
 
 import torch
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -332,22 +335,22 @@ class PasskeyRetrievalBenchmark:
     
     def print_results(self, results: PasskeyBenchmarkResult):
         """Print formatted benchmark results."""
-        print("\n" + "=" * 60)
-        print("PASSKEY RETRIEVAL BENCHMARK RESULTS")
-        print("=" * 60)
-        
-        print(f"\nOverall Accuracy: {results.accuracy:.2%}")
-        print(f"Correct: {results.num_correct}/{results.num_total}")
-        
-        print("\nAccuracy by Context Length:")
+        logger.info("\n" + "=" * 60)
+        logger.info("PASSKEY RETRIEVAL BENCHMARK RESULTS")
+        logger.info("=" * 60)
+
+        logger.info(f"\nOverall Accuracy: {results.accuracy:.2%}")
+        logger.info(f"Correct: {results.num_correct}/{results.num_total}")
+
+        logger.info("\nAccuracy by Context Length:")
         for length, acc in sorted(results.results_by_length.items()):
             bar = "█" * int(acc * 20) + "░" * (20 - int(acc * 20))
-            print(f"  {length:6d} tokens: {bar} {acc:.2%}")
-        
-        print("\nAccuracy by Passkey Position:")
+            logger.info(f"  {length:6d} tokens: {bar} {acc:.2%}")
+
+        logger.info("\nAccuracy by Passkey Position:")
         for pos, acc in sorted(results.results_by_position.items()):
             bar = "█" * int(acc * 20) + "░" * (20 - int(acc * 20))
-            print(f"  Position {pos}: {bar} {acc:.2%}")
-        
-        print("=" * 60)
+            logger.info(f"  Position {pos}: {bar} {acc:.2%}")
+
+        logger.info("=" * 60)
 

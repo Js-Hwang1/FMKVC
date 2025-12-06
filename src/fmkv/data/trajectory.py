@@ -13,12 +13,15 @@ The collector:
 """
 
 import os
+import logging
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 from dataclasses import dataclass
 from pathlib import Path
 import json
 
 import torch
+
+logger = logging.getLogger(__name__)
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -398,12 +401,12 @@ def load_trajectories(
             files_found.extend(sorted(path.glob(pattern)))
         
         if not files_found:
-            print(f"Warning: No trajectory files found in {path}")
-            print(f"  Looked for: {patterns}")
-            print(f"  Available files: {list(path.glob('*.pt'))}")
+            logger.warning(f"No trajectory files found in {path}")
+            logger.warning(f"  Looked for: {patterns}")
+            logger.warning(f"  Available files: {list(path.glob('*.pt'))}")
             return trajectories
-        
-        print(f"Found {len(files_found)} trajectory files")
+
+        logger.info(f"Found {len(files_found)} trajectory files")
         
         for file in tqdm(files_found, desc="Loading trajectories"):
             data = torch.load(file, weights_only=False)
@@ -447,6 +450,6 @@ def _parse_trajectory_window(w: dict) -> Optional[TrajectoryWindow]:
             sample_id=w.get("sample_id", "unknown"),
         )
     except Exception as e:
-        print(f"Warning: Failed to parse trajectory window: {e}")
+        logger.warning(f"Failed to parse trajectory window: {e}")
         return None
 

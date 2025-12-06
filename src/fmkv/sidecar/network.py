@@ -17,6 +17,8 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float
+from torch import Tensor
 
 from fmkv.sidecar.config import SidecarConfig
 from fmkv.sidecar.encoder import create_encoder
@@ -146,13 +148,13 @@ class Sidecar(nn.Module):
     
     def forward(
         self,
-        kv_window: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        kv_window: Float[Tensor, "batch window_size input_dim"],
+        attention_mask: Optional[Float[Tensor, "batch window_size"]] = None,
         return_split: bool = True,
-    ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    ) -> Union[Tuple[Float[Tensor, "batch d_head"], Float[Tensor, "batch d_head"]], Float[Tensor, "batch output_dim"]]:
         """
         Forward pass: compress window of KV pairs to single super-token.
-        
+
         Args:
             kv_window: Input tensor of shape (batch, window_size, 2*d_head).
                        Contains concatenated [K, V] vectors for each position.
@@ -160,7 +162,7 @@ class Sidecar(nn.Module):
                            1 for valid positions, 0 for padding.
             return_split: If True, return (K_CG, V_CG) as separate tensors.
                          If False, return concatenated [K_CG; V_CG].
-        
+
         Returns:
             If return_split=True:
                 Tuple of (K_CG, V_CG), each of shape (batch, d_head)
@@ -194,18 +196,18 @@ class Sidecar(nn.Module):
     
     def compress_cache(
         self,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        keys: Float[Tensor, "batch window_size d_head"],
+        values: Float[Tensor, "batch window_size d_head"],
+        attention_mask: Optional[Float[Tensor, "batch window_size"]] = None,
+    ) -> Tuple[Float[Tensor, "batch d_head"], Float[Tensor, "batch d_head"]]:
         """
         Convenience method to compress separate K and V tensors.
-        
+
         Args:
             keys: Key tensor of shape (batch, window_size, d_head)
             values: Value tensor of shape (batch, window_size, d_head)
             attention_mask: Optional mask of shape (batch, window_size)
-        
+
         Returns:
             Tuple of (K_CG, V_CG), each of shape (batch, d_head)
         """

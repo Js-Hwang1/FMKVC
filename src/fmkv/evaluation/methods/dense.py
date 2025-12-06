@@ -4,6 +4,7 @@ Dense (uncompressed) baseline method.
 This serves as the upper bound for quality - no compression is applied.
 """
 
+import logging
 import time
 from typing import Optional
 
@@ -11,6 +12,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .base import BaseMethod, GenerationOutput, MethodConfig
+
+logger = logging.getLogger(__name__)
 
 
 class DenseMethod(BaseMethod):
@@ -33,7 +36,7 @@ class DenseMethod(BaseMethod):
         if self._is_setup:
             return
         
-        print(f"[Dense] Loading model: {self.config.model_name}")
+        logger.info(f"Loading model: {self.config.model_name}")
         
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_name,
@@ -51,7 +54,7 @@ class DenseMethod(BaseMethod):
         self.model.eval()
         
         self._is_setup = True
-        print(f"[Dense] Model loaded: {self.model.config.num_hidden_layers} layers")
+        logger.info(f"Model loaded: {self.model.config.num_hidden_layers} layers")
     
     def generate(
         self,

@@ -13,12 +13,15 @@ Training loop for the Sidecar network with:
 import os
 import json
 import math
+import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
 
 import torch
+
+logger = logging.getLogger(__name__)
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -345,7 +348,7 @@ class SidecarTrainer:
                             self.early_stopping_counter += 1
                         
                         if self.early_stopping_counter >= self.config.early_stopping_patience:
-                            print(f"Early stopping at step {self.global_step}")
+                            logger.info(f"Early stopping at step {self.global_step}")
                             break
                         
                         self.sidecar.train()
@@ -457,7 +460,7 @@ class SidecarTrainer:
             
             # Add to metrics (always, not just at log_steps)
             metrics["output/k_cg_norm"] = k_norm
-            metrics["output/v_cg_norm"] = v_cg_norm
+            metrics["output/v_cg_norm"] = v_norm
         
         return loss, metrics
     
@@ -468,31 +471,48 @@ class SidecarTrainer:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compress multiple windows separately.
-        
+
         Bug #19 Fix: Compresses each window into a super-token, resulting in
         multiple super-tokens that make attention non-trivial.
-        
+
         Args:
             keys: (batch, num_windows, seq_len, d_head)
             values: (batch, num_windows, seq_len, d_head)
-        
+
         Returns:
             k_cg: (batch, num_windows, d_head) - one super-token per window
             v_cg: (batch, num_windows, d_head)
         """
+        # Shape assertion: verify 4D input
+        assert keys.dim() == 4, f"Expected 4D keys, got {keys.dim()}D"
+        assert values.dim() == 4, f"Expected 4D values, got {values.dim()}D"
+
         batch_size, num_windows, seq_len, d_head = keys.shape
-        
+
         # Reshape to (batch * num_windows, seq_len, d_head)
         keys_flat = keys.reshape(batch_size * num_windows, seq_len, d_head)
         values_flat = values.reshape(batch_size * num_windows, seq_len, d_head)
-        
+
+        # Shape assertion after reshape
+        assert keys_flat.shape == (batch_size * num_windows, seq_len, d_head), (
+            f"keys_flat shape mismatch: {keys_flat.shape}"
+        )
+
         # Compress each window
         k_cg_flat, v_cg_flat = self.sidecar.compress_cache(keys_flat, values_flat)
-        
+
+        # Shape assertion: compressed should be (batch * num_windows, d_head)
+        assert k_cg_flat.dim() == 2, f"Expected 2D k_cg_flat, got {k_cg_flat.dim()}D"
+
         # Reshape back to (batch, num_windows, d_head)
         k_cg = k_cg_flat.reshape(batch_size, num_windows, d_head)
         v_cg = v_cg_flat.reshape(batch_size, num_windows, d_head)
-        
+
+        # Final shape assertion
+        assert k_cg.shape == (batch_size, num_windows, d_head), (
+            f"k_cg shape mismatch: expected {(batch_size, num_windows, d_head)}, got {k_cg.shape}"
+        )
+
         return k_cg, v_cg
     
     def _flatten_windows(
@@ -502,18 +522,27 @@ class SidecarTrainer:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Flatten multiple windows into a single sequence for dense attention.
-        
+
         Args:
             keys: (batch, num_windows, seq_len, d_head)
             values: (batch, num_windows, seq_len, d_head)
-        
+
         Returns:
             keys_flat: (batch, num_windows * seq_len, d_head)
             values_flat: (batch, num_windows * seq_len, d_head)
         """
+        # Shape assertion: verify 4D input
+        assert keys.dim() == 4, f"Expected 4D keys, got {keys.dim()}D"
+
         batch_size, num_windows, seq_len, d_head = keys.shape
         keys_flat = keys.reshape(batch_size, num_windows * seq_len, d_head)
         values_flat = values.reshape(batch_size, num_windows * seq_len, d_head)
+
+        # Shape assertion after reshape
+        expected_shape = (batch_size, num_windows * seq_len, d_head)
+        assert keys_flat.shape == expected_shape, (
+            f"keys_flat shape mismatch: expected {expected_shape}, got {keys_flat.shape}"
+        )
         return keys_flat, values_flat
     
     @torch.no_grad()
@@ -586,7 +615,7 @@ class SidecarTrainer:
         # Manage checkpoint limit
         self._cleanup_checkpoints(checkpoint_dir)
         
-        print(f"Saved checkpoint: {checkpoint_path}")
+        logger.info(f"Saved checkpoint: {checkpoint_path}")
     
     def _load_checkpoint(self, path: str):
         """Load a training checkpoint."""
@@ -605,7 +634,7 @@ class SidecarTrainer:
         self.epoch = checkpoint["epoch"]
         self.best_eval_loss = checkpoint.get("best_eval_loss", float("inf"))
         
-        print(f"Resumed from checkpoint: {path} (step {self.global_step})")
+        logger.info(f"Resumed from checkpoint: {path} (step {self.global_step})")
     
     def _cleanup_checkpoints(self, checkpoint_dir: Path):
         """Remove old checkpoints to stay within limit."""
