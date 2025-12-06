@@ -131,10 +131,13 @@ class PerplexityBenchmark(BaseBenchmark):
         
         # Filter empty texts
         texts = [t for t in texts if t and len(t.strip()) > 0]
-        
-        if self.num_samples:
-            texts = texts[:self.num_samples]
-        
+
+        # Bug #27 Fix: Don't limit texts here - we need enough tokens for sliding windows
+        # The num_samples limit is applied to the sliding window samples, not input texts
+        # Limit to a reasonable number of texts to avoid OOM during tokenization
+        max_texts = min(len(texts), max(1000, (self.num_samples or 1000) * 10))
+        texts = texts[:max_texts]
+
         self.log(f"Tokenizing {len(texts)} text samples (max_seq_len={max_seq_len})...")
         
         # Tokenize each text separately to avoid exceeding model limits
@@ -239,16 +242,18 @@ class PerplexityBenchmark(BaseBenchmark):
                 import traceback
                 error_msg = f"Sample {sample['start_idx']}: {str(e)}"
                 errors.append(error_msg)
-                # Log first error with full traceback for debugging
+                # Print first error with full traceback for debugging (use print, not logger)
                 if len(errors) == 1:
-                    self.log(f"ERROR in compute_loss: {error_msg}")
-                    self.log(f"Traceback: {traceback.format_exc()}")
+                    print(f"\n{'='*60}")
+                    print(f"ERROR in compute_loss: {error_msg}")
+                    print(f"Traceback:\n{traceback.format_exc()}")
+                    print(f"{'='*60}\n")
                 continue
 
-        # Log error summary if any
+        # Print error summary if any (use print, not logger)
         if errors:
-            self.log(f"WARNING: {len(errors)}/{len(samples)} samples failed!")
-            self.log(f"First error: {errors[0]}")
+            print(f"\nWARNING: {len(errors)}/{len(samples)} samples failed!")
+            print(f"First error: {errors[0]}")
 
         # Compute final metrics
         if total_tokens > 0:

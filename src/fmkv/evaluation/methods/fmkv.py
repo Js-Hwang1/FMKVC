@@ -142,24 +142,25 @@ class FMKVMethod(BaseMethod):
     def _init_default_sidecar(self) -> None:
         """Initialize default (untrained) Sidecar for testing."""
         from fmkv.sidecar import Sidecar, SidecarConfig
-        
+
         # Get model hidden size
         hidden_size = self.model.config.hidden_size
         num_heads = self.model.config.num_attention_heads
         head_dim = hidden_size // num_heads
-        
+
+        # Bug #25 Fix: Use correct SidecarConfig parameter names
         config = SidecarConfig(
-            input_dim=head_dim,
-            hidden_dim=256,
-            output_dim=head_dim,
-            num_encoder_layers=2,
-            num_heads=4,
-            encoder_type="transformer",
-            aggregator_type="set_transformer",
+            d_head=head_dim,
+            n_heads=num_heads,
+            encoder_hidden_dim=256,
+            encoder_num_layers=2,
+            encoder_num_heads=4,
+            window_size=64,
         )
-        
+
         self.sidecar = Sidecar(config)
-        self.sidecar.to(self.config.device)
+        # Bug #25 Fix: Match sidecar dtype to model dtype
+        self.sidecar.to(device=self.config.device, dtype=self.config.torch_dtype_parsed)
         self.sidecar.eval()
     
     def _setup_compression_policy(self) -> None:
@@ -556,7 +557,14 @@ class FMKVMethod(BaseMethod):
             # Bug #23 Fix: Compute position_ids for suffix
             # With RoPE, position IDs must account for compressed cache length
             # The suffix tokens should have positions starting AFTER the compressed cache
-            compressed_cache_len = compressed_kv[0][0].shape[2] if compressed_kv else 0
+            # Bug #26 Fix: Handle both DynamicCache and tuple formats
+            from transformers.cache_utils import DynamicCache
+            if isinstance(compressed_kv, DynamicCache):
+                compressed_cache_len = compressed_kv.get_seq_length()
+            elif compressed_kv and len(compressed_kv) > 0:
+                compressed_cache_len = compressed_kv[0][0].shape[2]
+            else:
+                compressed_cache_len = 0
             suffix_len = suffix_ids.shape[1]
             # Bug #24 Fix: Use input_ids.device instead of self.model.device
             # (device_map may distribute model across devices)
@@ -612,25 +620,36 @@ class FMKVMethod(BaseMethod):
 
     def _compress_cache_for_eval(
         self,
-        past_key_values: tuple,
-    ) -> tuple[tuple, int]:
+        past_key_values,
+    ) -> tuple:
         """
         Compress KV cache for perplexity evaluation.
 
         Unlike generation, this compresses the entire prefix to simulate
         what the cache would look like after compression during generation.
+
+        Bug #26 Fix: Handle both DynamicCache objects and legacy tuples.
         """
+        from transformers.cache_utils import DynamicCache
+
         if self.sidecar is None:
             return past_key_values, 0
 
+        # Convert DynamicCache to legacy tuple format for processing
+        is_dynamic_cache = isinstance(past_key_values, DynamicCache)
+        if is_dynamic_cache:
+            cache_tuple = past_key_values.to_legacy_cache()
+        else:
+            cache_tuple = past_key_values
+
         window_size = getattr(self.compression_policy, 'window_size', 64) if self.compression_policy else 64
-        num_layers = len(past_key_values)
+        num_layers = len(cache_tuple)
 
         compressed_kv = []
         total_compressed = 0
 
         for layer_idx in range(num_layers):
-            keys, values = past_key_values[layer_idx]
+            keys, values = cache_tuple[layer_idx]
             batch_size, num_heads, seq_len, head_dim = keys.shape
 
             if seq_len < window_size:
@@ -709,7 +728,12 @@ class FMKVMethod(BaseMethod):
             else:
                 compressed_kv.append((keys, values))
 
-        return tuple(compressed_kv), total_compressed
+        # Convert back to DynamicCache if input was DynamicCache
+        result_tuple = tuple(compressed_kv)
+        if is_dynamic_cache:
+            result_cache = DynamicCache.from_legacy_cache(result_tuple)
+            return result_cache, total_compressed
+        return result_tuple, total_compressed
     
     def get_cache_stats(self) -> dict:
         """Return cache statistics."""
