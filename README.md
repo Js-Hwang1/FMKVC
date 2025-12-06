@@ -1,79 +1,151 @@
-## Force-Matched KV Cache Compression: A Physics-Inspired Framework
+# Force-Matched KV Cache Compression (FMKVC)
 
-### 1. Introduction & MotivationCurrent 
-Key-Value (KV) cache compression methods rely predominantly on static importance metrics (e.g., accumulated attention scores in H2O, StreamingLLM) or local geometric similarity (e.g., Token Merging via cosine similarity). These methods are fundamentally lossy: they delete or average information based on a scalar heuristic, often destroying the complex vector field dynamics that drive the Transformer's reasoning.We propose a Learned Coarse-Graining (CG) approach inspired by Force Matching (or Multiscale Coarse-Graining) in Molecular Dynamics (MD). In MD, coarse-grained "beads" are optimized not to look like atoms, but to exert the same forces on their neighbors as the original atomic cluster.Transferred to LLMs, we shift the paradigm from Selection (keeping/dropping tokens) to Synthesis (generating super-tokens). We ask: "How can we synthesize a compressed token state that exerts the exact same gradient force on future queries as the original uncompressed cluster?"
+A physics-inspired framework for KV cache compression in large language models.
 
-### 2. Mathematical Framework
-#### 2.1. The All-Atom System (Full Attention Physics)
-Consider a Transformer layer at time step $t$. Let the sequence of hidden states be $H_t = [h_1, \dots, h_t] \in \mathbb{R}^{t \times d_{model}}$.The attention mechanism for a specific head $h$ projects these states into queries, keys, and values using weight matrices $W_Q, W_K, W_V \in \mathbb{R}^{d_{model} \times d_{head}}$:$$q_t = h_t W_Q, \quad K_t = H_t W_K, \quad V_t = H_t W_V$$The output of the attention mechanism for the current query $q_t$ against the context $\{K, V\}$ is given by:$$\text{Attn}(q_t, K, V) = \text{softmax}\left(\frac{q_t K^\top}{\sqrt{d_{head}}}\right) V$$We define the "Force" exerted by a past token $i$ on the current query $q_t$ as the gradient of the loss $\mathcal{L}$ with respect to the interaction term (the key $k_i$). This gradient represents how the token $k_i$ "steers" the generation:$$F_{i \to q_t} \triangleq \nabla_{k_i} \mathcal{L} = \frac{\partial \mathcal{L}}{\partial \text{Attn}} \cdot \frac{\partial \text{Attn}}{\partial k_i}$$In long-context reasoning, precise preservation of this gradient field is required to maintain the model's trajectory on the loss landscape.
+## 1. Introduction
 
-#### 2.2. The Coarse-Grained System (Compressed Cache)
-We introduce a learned Mapping Operator $\Phi_\theta: \mathbb{R}^{N \times d} \to \mathbb{R}^{1 \times d}$, parameterized by a lightweight neural network (the "Sidecar").$\Phi_\theta$ maps a local temporal window of $N$ fine-grained tokens $\mathcal{C} = \{(k_j, v_j)\}_{j=1}^N$ to a single coarse-grained bead $(K_{CG}, V_{CG})$:$$\begin{bmatrix} K_{CG} \\ V_{CG} \end{bmatrix} = \Phi_\theta\left( \begin{bmatrix} k_1 & \dots & k_N \\ v_1 & \dots & v_N \end{bmatrix} \right)$$Unlike naive pooling ($K_{CG} = \frac{1}{N}\sum k_j$), $\Phi_\theta$ is a non-linear, deep projection learned to preserve interaction dynamics.
-#### 2.3. The Objective: Force Matching Loss
-In statistical mechanics, Force Matching minimizes the expected squared difference between the coarse-grained force and the true many-body force: $\min_\theta \mathbb{E}[\| F_{AA} - F_{CG} \|^2]$.We adapt this to the Attention mechanism. Let $\mathcal{Q}_{future}$ be a set of future queries sampled from the training corpus that would attend to the window $\mathcal{C}$. We optimize $\theta$ to minimize the difference in the Attention Gradient (Jacobian).The Force Matching Loss Function $\mathcal{L}_{FM}$:$$\mathcal{L}_{FM}(\theta) = \sum_{q \in \mathcal{Q}_{future}} \left\| \underbrace{\sum_{j=1}^N \nabla_{q} \text{Attn}(q, \{k_j\}, \{v_j\})}_{\text{True Aggregate Force}} - \underbrace{\nabla_{q} \text{Attn}(q, \{K_{CG}\}, \{V_{CG}\})}_{\text{Effective Coarse Force}} \right\|_F^2 + \lambda \mathcal{L}_{consistency}$$Where:
+Current KV cache compression methods rely on heuristic importance metrics (H2O, StreamingLLM) or geometric similarity (Token Merging). These methods are fundamentally lossy: they delete or average information based on scalar heuristics, often destroying the complex dynamics that drive the Transformer's reasoning.
 
-- $\nabla_q \text{Attn}(\dots)$: The Jacobian of the attention output with respect to the query $q$. Matching this ensures the compressed token "pulls" the query vector in the same direction as the original cluster.
+We propose a **Learned Coarse-Graining** approach inspired by Force Matching in Molecular Dynamics. Instead of *selecting* which tokens to keep, we *synthesize* super-tokens that preserve the functional behavior of the original token window.
 
-- $\mathcal{L}_{consistency}$: A regularization term to ensure the output value magnitude is preserved: $\| \text{Attn}_{dense} - \text{Attn}_{CG} \|^2$.
+## 2. The Physics of Attention
 
-### 3. Engineering Implementation: The "Sidecar" Architecture
-Crucially, we do not retrain or fine-tune the 70B LLM. We train a tiny, auxiliary "Sidecar" network offline.
+In Molecular Dynamics, **Force Matching** constructs a coarse-grained (CG) model by minimizing the difference between forces exerted by CG beads and forces from the original all-atom system:
 
-#### 3.1. The Sidecar Network ($\Phi_\theta$) architecture
-- Input: Tensor $\mathbf{X} \in \mathbb{R}^{B \times N \times 2d_{head}}$ (concatenated K and V vectors for a window of size $N$).
-- Encoder: A 3-layer Graph Isomorphism Network (GIN) or a simplified Transformer Encoder ($d_{model}=256$) to capture intra-window dependencies (e.g., subject-verb relationships within the token cluster).
-- Aggregator: A Learned Attention Pooling layer (e.g., Set Transformer) to compress $N \to 1$.
-- Output: Two vectors $K_{CG}, V_{CG} \in \mathbb{R}^{d_{head}}$.
-- Complexity: $\approx 10^6$ parameters ($0.001\%$ of Llama-2-7B).
+$$\min_{\theta} \mathbb{E} \left[ \| \mathbf{F}_{dense} - \mathbf{F}_{CG}(\theta) \|^2 \right]$$
 
-#### 3.2. Offline Meta-Learning Pipeline
-1. Trajectory Collection: Run the frozen LLM on a representative corpus (e.g., RedPajama).
-2. Gradient Snapshotting: For every window of $N$ tokens, compute and cache the "True Force" vector $\sum \nabla_q \text{Attn}$ produced by subsequent tokens.
-3. Supervised Training: Train $\Phi_\theta$ to minimize $\mathcal{L}_{FM}$ using these cached gradients. This allows the Sidecar to learn the "physics" of how text gradients aggregate, independent of specific facts.
+To apply this to LLMs, we must rigorously define the analog of "Force" within the Transformer computational graph.
 
-#### 3.3. Online Inference Workflow (Forward-Pass Only)
-During inference, backpropagation is disabled. The Sidecar runs in purely feed-forward mode.
+## 3. Definition of the Steering Force
+
+The "trajectory" of a Transformer is determined by how context modifies hidden states of future tokens. The mathematical object that "steers" this trajectory is the **gradient flow**.
+
+We define the **Force** exerted by memory (KV Cache) on the present (Query) as:
+
+$$\vec{F}(q_t) \triangleq \nabla_{q_t} \mathcal{L} = \mathbf{J}_{Attn}^\top \cdot \vec{\delta}$$
+
+Where:
+- $\mathcal{L}$ is the scalar loss (e.g., Cross-Entropy for next-token prediction)
+- $q_t \in \mathbb{R}^d$ is the query vector at time step $t$
+- $\vec{\delta} = \frac{\partial \mathcal{L}}{\partial y_t}$ is the **Error Signal** backpropagating from future layers
+- $\mathbf{J}_{Attn} = \frac{\partial y_t}{\partial q_t}$ is the **Attention Jacobian**
+
+The vector $\vec{F}(q_t) \in \mathbb{R}^d$ represents the **net steering impulse** provided by memory context. It tells the query "which direction to move" in latent space to minimize prediction error.
+
+## 4. The Force Matching Objective
+
+We learn a compression function $\Phi_\theta$ that maps a dense cluster $\mathcal{M}_{dense} = \{k_{1:N}, v_{1:N}\}$ to a single bead $\mathcal{M}_{bead} = \{\tilde{k}, \tilde{v}\}$.
+
+The objective ensures the bead exerts the same steering force as the original cluster:
+
+$$\mathcal{L}_{FM}(\theta) = \sum_{q \sim \mathcal{D}} \left\| \underbrace{\nabla_q \mathcal{L}(\text{Attn}(q, \mathcal{M}_{dense}))}_{\text{True Force}} - \underbrace{\nabla_q \mathcal{L}(\text{Attn}(q, \Phi_\theta(\mathcal{M}_{dense})))}_{\text{Effective Force}} \right\|_2^2$$
+
+### 4.1 Why Force Matching over Output Matching?
+
+Why not simply match attention outputs ($y_{dense} \approx y_{CG}$)?
+
+**Sensitivity Preservation:** Two memory configurations might produce the same output $y_t$ but have vastly different gradients.
+- **Output Matching:** Ensures correct prediction *now*
+- **Force Matching:** Preserves the **curvature** of the loss landscape. If the query shifts slightly (due to previous approximations), a Force-Matched cache corrects the trajectory exactly as dense would.
+
+**Vector Field Dynamics:** Token pruning creates "holes" in the force field. Averaging smooths the field, destroying high-frequency signals. Force Matching synthesizes a bead that generates a **potential well** indistinguishable from the original cluster.
+
+## 5. Implementation
+
+### 5.1 The Sidecar Network
+
+A lightweight neural network $\Phi_\theta$ performs the compression:
+
+$$\begin{bmatrix} \tilde{k} \\ \tilde{v} \end{bmatrix} = \Phi_\theta\left( \begin{bmatrix} k_1 & \cdots & k_N \\ v_1 & \cdots & v_N \end{bmatrix} \right)$$
+
+**Architecture:**
+- Input: $(N \times 2d)$ concatenated K and V vectors
+- Encoder: 3-layer Transformer ($d_{model}=256$) for intra-window dependencies
+- Aggregator: Learned attention pooling (Set Transformer) for $N \to 1$ compression
+- Output: $(2d)$ super-token (split into $\tilde{k}$ and $\tilde{v}$)
+- Parameters: ~1M (~0.001% of LLaMA-7B)
+
+### 5.2 Two-Phase Training
+
+**Offline Phase (Collect True Forces):**
+Run forward pass through frozen LLM. Run backward pass. Hook gradients at attention layer inputs:
+$$\vec{F}_{target} = \texttt{hidden\_states.grad}$$
+
+This vector has shape $(B, N, d)$ — the force acting on every token.
+
+**Online Phase (Train $\Phi_\theta$):**
+Compute compressed bead. Run local attention. Compute gradient w.r.t. query using `torch.autograd.grad(create_graph=True)`:
+$$\vec{F}_{pred} = \nabla_q \text{Attention}(q, \tilde{k}, \tilde{v}) \cdot \vec{\delta}$$
+
+Minimize: $\text{MSE}(\vec{F}_{target}, \vec{F}_{pred})$
+
+## 6. Data Collection
+
+### 6.1 Trajectory Collection with Forces
+
+```bash
+python scripts/collect_trajectories.py \
+    --model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+    --output_dir ./data/trajectories \
+    --num_samples 10000 \
+    --window_size 64 \
+    --collect_forces  # CRITICAL: enables TRUE force matching
+```
+
+The `--collect_forces` flag runs a backward pass to collect:
+$$\vec{F}_j = \nabla_{h_j} \mathcal{L}_{NTP}$$
+
+where $\mathcal{L}_{NTP}$ is the next-token prediction loss.
+
+### 6.2 Parallel Collection for HPC
+
+For large-scale collection on HPC (96-core nodes):
+
+```bash
+python scripts/collect_trajectories_parallel.py \
+    --num_workers 16 \
+    --num_samples 1000000 \
+    --collect_forces
+```
+
+## 7. Training
+
+```bash
+python scripts/train_sidecar.py \
+    --model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+    --trajectories_path ./data/trajectories \
+    --output_dir ./checkpoints \
+    --batch_size 512 \
+    --max_steps 2000 \
+    --learning_rate 1e-3
+```
+
+## 8. Inference
+
+During inference, the Sidecar runs in pure forward mode (no backprop):
+
 ```python
-def inference_step(model, input_token, kv_cache, sidecar_policy, window_size=64):
-    # 1. Standard LLM Forward Pass
+def inference_step(model, input_token, kv_cache, sidecar, window_size=64):
+    # 1. Standard LLM forward pass
     logits, new_k, new_v = model(input_token, kv_cache)
-    
-    # 2. Append to Cache
     kv_cache.append(new_k, new_v)
-    
-    # 3. Dynamic Compression Trigger
+
+    # 2. Compression trigger
     if len(kv_cache) % window_size == 0:
-        # A. Select the oldest uncompressed window
-        cluster = kv_cache[0 : window_size]
-        
-        # B. Run Sidecar (Fast O(1) forward pass)
-        # The Sidecar 'synthesizes' the gradient-preserving super-token
-        k_cg, v_cg = sidecar_policy(cluster) 
-        
-        # C. Update Cache (Replace N tokens with 1 super-token)
-        kv_cache = [k_cg, v_cg] + kv_cache[window_size:] 
-        
+        cluster = kv_cache[0:window_size]
+        k_cg, v_cg = sidecar(cluster)  # O(1) forward pass
+        kv_cache = [k_cg, v_cg] + kv_cache[window_size:]
+
     return logits
 ```
 
-### 4. Benchmarking Strategy
-To demonstrate the superiority of Gradient Synthesis over Heuristic Selection, we propose the following evaluation suite.
+## 9. Complexity Analysis
 
-#### 4.1. Baselines
-1. Dense Attention (Oracle): Full uncompressed KV Cache.
-2. H2O / StreamingLLM (SOTA Eviction): Keeps "Heavy Hitters" based on accumulated attention scores.
-3. Token Merging (ToMe): Merges tokens based on cosine similarity of Key vectors (geometric clustering)
+- **Training Cost:** Low. Sidecar is tiny (~1M params). Training requires only cached activations, not end-to-end backprop through the LLM.
+- **Inference Overhead:** Negligible $O(1)$ Sidecar forward pass every $N$ tokens.
+- **Memory Reduction:** $N \to 1$ compression reduces cache from $L$ to $L/N$ tokens.
+- **Attention Speedup:** $O(L^2) \to O((L/N)^2)$ for long contexts.
 
-#### 4.2. Critical Benchmarks
-| Benchmark | Domain | Why it validates Force Matching | 
-| --------- | ------ | ------------------------------- |
-| Passkey Retrieval | Exact Recall | Finds a random number hidden in 100k tokens. Static eviction often fails because random numbers have low initial attention scores. Force matching should preserve the gradient potential of the retrieval. |
-| LongBench | Multi-hop Reasoning | Tasks where clues are distributed (e.g., MultiFieldQA). Requires preserving the causal relationship between tokens, which simple averaging destroys but gradient matching preserves. |
-| PPL vs. Cache Size | Efficiency | We hypothesize a superior Pareto frontier: lower perplexity at higher compression ratios (e.g., 90% compression) compared to H2O. | 
-| "Needle in a Heap" | Anomaly Preservation | Evaluates if the merger destroys low-probability but high-information tokens. Force Matching inherently protects "anomalous" tokens that exert strong gradients on the loss. |
+## Development Notes
 
-### 5. Feasibility & Complexity Analysis
-- Training Cost: Low. The Sidecar is tiny. Training requires only cached activations, not end-to-end backpropagation through the 70B parameter model.
-- Inference Latency:
-    - Overhead: The Sidecar adds a negligible $O(1)$ computation every $N$ steps.
-    - Speedup: By reducing the cache size from $L$ to $L/N$, the $O(L^2)$ attention mechanism becomes $O((L/N)^2)$, offering quadratic speedups for long contexts.
+See [CLAUDE.md](CLAUDE.md) for engineering standards and implementation guidelines.

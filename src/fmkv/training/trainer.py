@@ -381,24 +381,35 @@ class SidecarTrainer:
         keys = batch["keys"]
         values = batch["values"]
         queries = batch["queries"]
-        
+        forces = batch.get("forces")  # Optional: per-KV-position gradients for weighting
+        force_queries = batch.get("force_queries")  # Optional: per-query gradients (TRUE force targets)
+
         # Bug #19 Fix: Handle multi-window training
         # keys/values can be either:
         # - (batch, seq_len, d_head) - single window
         # - (batch, num_windows, seq_len, d_head) - multiple windows
         is_multi_window = keys.dim() == 4
-        
+
         # Handle query dimension mismatch
         # Queries from hidden states may have different dim than keys
         q_dim = queries.size(-1)
         k_dim = keys.size(-1)
-        
+
         if q_dim != k_dim:
             if q_dim > k_dim:
                 queries = queries[..., :k_dim]
             else:
                 queries = torch.nn.functional.pad(queries, (0, k_dim - q_dim))
-        
+
+        # Flatten forces for multi-window if present
+        # forces shape: (batch, num_windows, window_size, hidden) -> (batch, total_seq, hidden)
+        forces_flat = None
+        if forces is not None and is_multi_window:
+            batch_size, num_windows, window_size, hidden_dim = forces.shape
+            forces_flat = forces.reshape(batch_size, num_windows * window_size, hidden_dim)
+        elif forces is not None:
+            forces_flat = forces
+
         # Forward through Sidecar
         # Use autocast compatible with both old and new PyTorch APIs
         # Check PyTorch version to use correct API
@@ -413,14 +424,16 @@ class SidecarTrainer:
                 else:
                     k_cg, v_cg = self.sidecar.compress_cache(keys, values)
                     keys_dense, values_dense = keys, values
-                
-                # Compute loss
+
+                # Compute loss with forces (for TRUE force matching)
                 loss, metrics = self.loss_fn(
                     queries=queries,
                     keys=keys_dense,
                     values=values_dense,
                     k_cg=k_cg,
                     v_cg=v_cg,
+                    forces=forces_flat,
+                    force_queries=force_queries,
                 )
         else:
             # Old API (PyTorch < 2.0): torch.cuda.amp.autocast(enabled=bool)
@@ -432,14 +445,16 @@ class SidecarTrainer:
                 else:
                     k_cg, v_cg = self.sidecar.compress_cache(keys, values)
                     keys_dense, values_dense = keys, values
-                
-                # Compute loss
+
+                # Compute loss with forces (for TRUE force matching)
                 loss, metrics = self.loss_fn(
                     queries=queries,
                     keys=keys_dense,
                     values=values_dense,
                     k_cg=k_cg,
                     v_cg=v_cg,
+                    forces=forces_flat,
+                    force_queries=force_queries,
                 )
         
         # Bug #14 & #15 Fix: Always compute and log output norms (outside autocast)

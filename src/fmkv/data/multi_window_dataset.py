@@ -121,30 +121,42 @@ class MultiWindowDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
         Get a training sample with multiple windows.
-        
+
         Returns dict with:
             - keys: (num_windows, window_size, d_head) - multiple windows
             - values: (num_windows, window_size, d_head) - multiple windows
             - queries: (num_queries, d_head) - from the last window
             - layer_idx: int
+            - forces: (num_windows, window_size, hidden_dim) - optional force vectors
         """
         windows = self.groups[idx]
-        
+
         # Stack all windows
         keys_list = [w.keys for w in windows]
         values_list = [w.values for w in windows]
-        
+
         # Use queries from the last window (they should attend to all windows)
         queries = windows[-1].future_queries
         layer_idx = windows[0].layer_idx
-        
+
         sample = {
             "keys": torch.stack(keys_list, dim=0),  # (num_windows, window_size, d_head)
             "values": torch.stack(values_list, dim=0),  # (num_windows, window_size, d_head)
             "queries": queries,  # (num_queries, d_head)
             "layer_idx": torch.tensor(layer_idx),
         }
-        
+
+        # Include force vectors if available (for TRUE force matching)
+        has_forces = all(w.forces is not None for w in windows)
+        if has_forces:
+            forces_list = [w.forces for w in windows]
+            sample["forces"] = torch.stack(forces_list, dim=0)  # (num_windows, window_size, hidden)
+
+        # Include force_queries for TRUE force matching (target steering forces)
+        # Use force_queries from the last window (same as queries)
+        if windows[-1].force_queries is not None:
+            sample["force_queries"] = windows[-1].force_queries  # (num_queries, hidden)
+
         return sample
     
     def get_collate_fn(self):
@@ -155,8 +167,9 @@ class MultiWindowDataset(Dataset):
             # keys: (num_windows, window_size, d_head)
             # values: (num_windows, window_size, d_head)
             # queries: (num_queries, d_head)
-            
-            return {
+            # forces: (num_windows, window_size, hidden) - optional
+
+            result = {
                 "keys": torch.stack([s["keys"] for s in batch], dim=0),
                 # → (batch, num_windows, window_size, d_head)
                 "values": torch.stack([s["values"] for s in batch], dim=0),
@@ -165,5 +178,17 @@ class MultiWindowDataset(Dataset):
                 # → (batch, num_queries, d_head)
                 "layer_idx": torch.stack([s["layer_idx"] for s in batch], dim=0),
             }
-        
+
+            # Include forces if available in all samples
+            if all("forces" in s for s in batch):
+                result["forces"] = torch.stack([s["forces"] for s in batch], dim=0)
+                # → (batch, num_windows, window_size, hidden)
+
+            # Include force_queries if available (TRUE force matching targets)
+            if all("force_queries" in s for s in batch):
+                result["force_queries"] = torch.stack([s["force_queries"] for s in batch], dim=0)
+                # → (batch, num_queries, hidden)
+
+            return result
+
         return collate_fn

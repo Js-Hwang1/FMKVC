@@ -193,6 +193,14 @@ def parse_args():
         help="Save checkpoint every N windows",
     )
     
+    # Force collection (TRUE Force Matching)
+    parser.add_argument(
+        "--collect_forces",
+        action="store_true",
+        help="Collect force vectors (gradients) for TRUE force matching. "
+             "This requires running backward pass through the LLM.",
+    )
+
     # Misc
     parser.add_argument(
         "--seed",
@@ -206,7 +214,7 @@ def parse_args():
         default=4,
         help="DataLoader workers",
     )
-    
+
     return parser.parse_args()
 
 
@@ -266,6 +274,128 @@ def collate_fn(batch, pad_token_id: int = 0):
     return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
+def extract_kv_and_forces(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    target_layers: Optional[List[int]] = None,
+    collect_forces: bool = True,
+) -> Tuple[Dict[int, Tuple[torch.Tensor, torch.Tensor]], Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
+    """
+    Extract KV states and force vectors (gradients) from model.
+
+    The "force" is the gradient of the loss w.r.t. the hidden state at the
+    input of each attention layer: F = ∂L/∂h where h is the attention input.
+
+    This implements the theoretical Force Matching formulation from MD.
+
+    Two-pass approach:
+    1. First pass (no grad): Extract KV cache
+    2. Second pass (with grad): Collect force vectors via backward hooks
+
+    Returns:
+        Tuple of:
+            - kv_states: Dict mapping layer_idx -> (keys, values)
+            - hidden_dict: Dict mapping layer_idx -> hidden_states
+            - forces: Dict mapping layer_idx -> gradient tensors (the "forces")
+    """
+    num_layers = model.config.num_hidden_layers
+    if target_layers is None:
+        target_layers = list(range(num_layers))
+
+    # === PASS 1: Extract KV cache (no gradients) ===
+    with torch.no_grad():
+        outputs_kv = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+        past_key_values = outputs_kv.past_key_values
+        hidden_states = outputs_kv.hidden_states
+
+        kv_states = {}
+        for layer_idx in target_layers:
+            if layer_idx >= len(past_key_values):
+                continue
+            keys, values = past_key_values[layer_idx]
+            kv_states[layer_idx] = (keys.cpu(), values.cpu())
+
+        hidden_dict = {
+            i: h.cpu() for i, h in enumerate(hidden_states)
+            if target_layers is None or i in target_layers
+        }
+
+    # === PASS 2: Collect force vectors via backward pass ===
+    force_grads = {}
+
+    if collect_forces:
+        hooks = []
+
+        # Register backward hooks on attention layer inputs
+        def make_hook(layer_idx):
+            def hook_fn(module, grad_input, grad_output):
+                # Try grad_input first (∂L/∂h_in), fallback to grad_output (δ = ∂L/∂h_out)
+                # grad_input may be empty if inputs don't require gradients
+                if len(grad_input) > 0 and grad_input[0] is not None:
+                    force_grads[layer_idx] = grad_input[0].detach().cpu()
+                elif len(grad_output) > 0 and grad_output[0] is not None:
+                    # Use grad_output as the "force" - this is the backprop error signal δ
+                    # F ≈ δ when J_Attn ≈ I (which happens for well-trained attention)
+                    force_grads[layer_idx] = grad_output[0].detach().cpu()
+            return hook_fn
+
+        try:
+            for layer_idx in target_layers:
+                if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+                    # LLaMA/Mistral style
+                    layer = model.model.layers[layer_idx]
+                    if hasattr(layer, 'self_attn'):
+                        hook = layer.self_attn.register_full_backward_hook(make_hook(layer_idx))
+                        hooks.append(hook)
+                elif hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+                    # GPT-2 style
+                    layer = model.transformer.h[layer_idx]
+                    if hasattr(layer, 'attn'):
+                        hook = layer.attn.register_full_backward_hook(make_hook(layer_idx))
+                        hooks.append(hook)
+
+            # Forward pass WITH gradients (no cache needed)
+            outputs_grad = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,  # Don't need cache for backward
+                output_hidden_states=False,  # Already have them
+                return_dict=True,
+            )
+
+            # Compute next-token prediction loss
+            logits = outputs_grad.logits[:, :-1, :].contiguous()
+            labels = input_ids[:, 1:].contiguous()
+
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+                ignore_index=-100,
+                reduction='mean'
+            )
+
+            # Backward pass to populate force_grads via hooks
+            loss.backward()
+
+            # Clear gradients from model parameters
+            model.zero_grad()
+
+        finally:
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
+
+    return kv_states, hidden_dict, force_grads
+
+
 @torch.no_grad()
 def extract_kv_from_model(
     model,
@@ -274,8 +404,8 @@ def extract_kv_from_model(
     target_layers: Optional[List[int]] = None,
 ) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
     """
-    Extract KV states from model forward pass.
-    
+    Extract KV states from model forward pass (legacy, no forces).
+
     Returns:
         Dict mapping layer_idx -> (keys, values)
         Keys/Values shape: (batch, num_heads, seq_len, head_dim)
@@ -288,32 +418,32 @@ def extract_kv_from_model(
         output_hidden_states=True,
         return_dict=True,
     )
-    
+
     # Extract KV cache
     past_key_values = outputs.past_key_values
     hidden_states = outputs.hidden_states
-    
+
     kv_states = {}
-    
+
     num_layers = len(past_key_values)
     if target_layers is None:
         target_layers = list(range(num_layers))
-    
+
     for layer_idx in target_layers:
         if layer_idx >= num_layers:
             continue
-        
+
         # past_key_values[layer] is tuple of (key, value)
         # Shape: (batch, num_heads, seq_len, head_dim)
         keys, values = past_key_values[layer_idx]
         kv_states[layer_idx] = (keys.cpu(), values.cpu())
-    
+
     # Also return hidden states for query projection
     hidden_dict = {
         i: h.cpu() for i, h in enumerate(hidden_states)
         if target_layers is None or i in target_layers
     }
-    
+
     return kv_states, hidden_dict
 
 
@@ -325,46 +455,51 @@ def extract_windows(
     num_future_queries: int,
     future_query_range: int,
     attention_mask: torch.Tensor,
+    forces: Optional[Dict[int, torch.Tensor]] = None,
 ) -> List[Dict]:
     """
     Extract sliding windows from KV states.
-    
+
     Returns list of window dicts with:
         - layer_idx
         - keys: (batch, window_size, d_head) - using first head
         - values: (batch, window_size, d_head)
         - queries: (batch, num_queries, hidden_dim)
         - window_start
+        - forces: (batch, window_size, hidden_dim) - if force collection enabled
     """
     windows = []
-    
+
     batch_size = attention_mask.size(0)
     seq_lengths = attention_mask.sum(dim=1).tolist()
-    
+
     for layer_idx, (keys, values) in kv_states.items():
         # keys shape: (batch, num_heads, seq_len, head_dim)
         _, num_heads, seq_len, head_dim = keys.shape
-        
+
         # Get hidden states for this layer
         hidden = hidden_states.get(layer_idx)
         if hidden is None:
             hidden = hidden_states.get(layer_idx + 1)  # Sometimes off by one
-        
+
+        # Get forces for this layer (if available)
+        layer_forces = forces.get(layer_idx) if forces else None
+
         for batch_idx in range(batch_size):
             actual_len = seq_lengths[batch_idx]
-            
+
             # Calculate number of windows for this sequence
             num_windows = (actual_len - window_size - future_query_range) // stride
-            
+
             for win_idx in range(max(num_windows, 0)):
                 start = win_idx * stride
                 end = start + window_size
                 query_start = end
                 query_end = min(end + future_query_range, actual_len)
-                
+
                 if query_end - query_start < num_future_queries:
                     continue
-                
+
                 # Extract KV window (use first head for simplicity)
                 # For multi-head, we'd need to either:
                 # 1. Average across heads
@@ -372,20 +507,20 @@ def extract_windows(
                 # 3. Use MultiHeadSidecar
                 k_window = keys[batch_idx, 0, start:end, :]  # (window, d_head)
                 v_window = values[batch_idx, 0, start:end, :]
-                
+
                 # Sample future query positions
                 available_queries = query_end - query_start
                 query_indices = torch.randperm(available_queries)[:num_future_queries]
                 query_positions = query_indices + query_start
-                
+
                 # Extract queries from hidden states
                 if hidden is not None:
                     queries = hidden[batch_idx, query_positions, :]
                 else:
                     # Fallback: use zeros (will need Q projection during training)
                     queries = torch.zeros(num_future_queries, head_dim)
-                
-                windows.append({
+
+                window_data = {
                     "layer_idx": layer_idx,
                     "batch_idx": batch_idx,
                     "window_start": start,
@@ -394,8 +529,19 @@ def extract_windows(
                     "queries": queries,
                     "head_dim": head_dim,
                     "num_heads": num_heads,
-                })
-    
+                }
+
+                # Extract force vectors for this window (TRUE FORCE MATCHING)
+                # Force shape: (seq_len, hidden_dim) -> extract (window_size, hidden_dim)
+                if layer_forces is not None:
+                    force_window = layer_forces[batch_idx, start:end, :]  # (window, hidden)
+                    # Also extract forces for query positions
+                    force_queries = layer_forces[batch_idx, query_positions, :]
+                    window_data["forces"] = force_window
+                    window_data["force_queries"] = force_queries
+
+                windows.append(window_data)
+
     return windows
 
 
@@ -407,26 +553,34 @@ def save_trajectories(
 ):
     """Save collected windows to disk."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Convert to tensors
     data = {
         "windows": [],
         "metadata": metadata,
     }
-    
+
+    has_forces = False
     for w in windows:
-        data["windows"].append({
+        window_data = {
             "layer_idx": w["layer_idx"],
             "window_start": w["window_start"],
             "keys": w["keys"],
             "values": w["values"],
             "queries": w["queries"],
-        })
-    
+        }
+        # Include force vectors if available (TRUE Force Matching)
+        if "forces" in w:
+            window_data["forces"] = w["forces"]
+            window_data["force_queries"] = w["force_queries"]
+            has_forces = True
+        data["windows"].append(window_data)
+
     filepath = output_dir / f"trajectories_{checkpoint_idx:05d}.pt"
     torch.save(data, filepath)
-    
-    print(f"Saved {len(windows)} windows to {filepath}")
+
+    force_str = " (with forces)" if has_forces else ""
+    print(f"Saved {len(windows)} windows{force_str} to {filepath}")
     return filepath
 
 
@@ -515,7 +669,6 @@ def main():
             args.dataset_name,
             args.dataset_config,
             split=args.dataset_split,
-            trust_remote_code=True,
         )
     except Exception as e:
         print(f"Error loading dataset with config: {e}")
@@ -523,7 +676,6 @@ def main():
         dataset = load_dataset(
             args.dataset_name,
             split=args.dataset_split,
-            trust_remote_code=True,
         )
     
     # Extract texts
@@ -577,10 +729,17 @@ def main():
         "future_query_range": args.future_query_range,
         "target_layers": target_layers,
         "max_seq_length": args.max_seq_length,
+        "has_forces": args.collect_forces,  # TRUE Force Matching data
     }
-    
+
     with open(output_dir / "metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
+
+    # Print force collection status
+    if args.collect_forces:
+        print("\n*** FORCE COLLECTION ENABLED ***")
+        print("Will compute gradients via backward pass for TRUE force matching.")
+        print("This will be slower but provides actual force vectors F = ∂L/∂h")
     
     # Collection loop
     all_windows = []
@@ -603,18 +762,32 @@ def main():
         else:
             batch_layers = target_layers
         
-        # Extract KV states
+        # Extract KV states (and optionally forces)
         try:
-            kv_states, hidden_states = extract_kv_from_model(
-                model,
-                input_ids,
-                attention_mask,
-                target_layers=batch_layers,
-            )
+            if args.collect_forces:
+                # TRUE Force Matching: collect gradients via backward pass
+                kv_states, hidden_states, forces = extract_kv_and_forces(
+                    model,
+                    input_ids,
+                    attention_mask,
+                    target_layers=batch_layers,
+                    collect_forces=True,
+                )
+            else:
+                # Legacy: no force collection
+                kv_states, hidden_states = extract_kv_from_model(
+                    model,
+                    input_ids,
+                    attention_mask,
+                    target_layers=batch_layers,
+                )
+                forces = None
         except Exception as e:
+            import traceback
             print(f"\nError extracting KV: {e}")
+            traceback.print_exc()
             continue
-        
+
         # Extract windows
         windows = extract_windows(
             kv_states,
@@ -624,6 +797,7 @@ def main():
             num_future_queries=args.num_future_queries,
             future_query_range=args.future_query_range,
             attention_mask=attention_mask.cpu(),
+            forces=forces,
         )
         
         all_windows.extend(windows)
@@ -639,6 +813,8 @@ def main():
         
         # Clear cache
         del kv_states, hidden_states
+        if forces is not None:
+            del forces
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     # Save remaining

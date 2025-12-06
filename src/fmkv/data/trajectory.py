@@ -60,20 +60,25 @@ class TrajectoryConfig:
 @dataclass
 class TrajectoryWindow:
     """A single window of KV states with future queries."""
-    
+
     layer_idx: int
     window_idx: int
-    
+
     # KV states for the window: (window_size, d_head)
     keys: torch.Tensor
     values: torch.Tensor
-    
+
     # Future queries that will attend to this window: (num_queries, d_head)
     future_queries: torch.Tensor
-    
+
     # Metadata
     position_offset: int  # Start position in original sequence
     sample_id: str
+
+    # Force vectors (optional, for TRUE force matching)
+    # Shape: (window_size, hidden_dim) - gradient of loss w.r.t. hidden states
+    forces: Optional[torch.Tensor] = None
+    force_queries: Optional[torch.Tensor] = None  # Forces at query positions
 
 
 class TrajectoryCollector:
@@ -394,7 +399,7 @@ def load_trajectories(
         trajectories = []
         
         # Try multiple patterns
-        patterns = ["checkpoint_*.pt", "trajectories_*.pt"]
+        patterns = ["checkpoint_*.pt", "trajectories_*.pt", "trajectory_*.pt"]
         files_found = []
         
         for pattern in patterns:
@@ -432,14 +437,18 @@ def _parse_trajectory_window(w: dict) -> Optional[TrajectoryWindow]:
         future_queries = w.get("future_queries")
         if future_queries is None:
             future_queries = w.get("queries")
-        
+
         # Check if we have the required fields
         if "keys" not in w or "values" not in w:
             return None
-        
+
         if future_queries is None:
             return None
-        
+
+        # Parse optional force vectors (for TRUE force matching)
+        forces = w.get("forces")
+        force_queries = w.get("force_queries")
+
         return TrajectoryWindow(
             layer_idx=w.get("layer_idx", 0),
             window_idx=w.get("window_idx", 0),
@@ -448,6 +457,8 @@ def _parse_trajectory_window(w: dict) -> Optional[TrajectoryWindow]:
             future_queries=future_queries,
             position_offset=w.get("position_offset", w.get("window_start", 0)),
             sample_id=w.get("sample_id", "unknown"),
+            forces=forces,
+            force_queries=force_queries,
         )
     except Exception as e:
         logger.warning(f"Failed to parse trajectory window: {e}")
