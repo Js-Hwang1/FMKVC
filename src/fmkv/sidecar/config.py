@@ -58,6 +58,10 @@ class SidecarConfig:
     
     # Compression window
     window_size: int = 64
+
+    # v6: Number of windows per sample (for window positional embeddings)
+    # This breaks symmetry at input level - each window gets a unique embedding
+    num_windows: int = 4
     
     # Encoder configuration
     encoder_type: EncoderType = EncoderType.TRANSFORMER

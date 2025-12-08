@@ -54,12 +54,18 @@ class Sidecar(nn.Module):
     def __init__(self, config: SidecarConfig):
         super().__init__()
         self.config = config
-        
+
         # Create encoder
         self.encoder = create_encoder(config)
-        
+
         # Create aggregator
         self.aggregator = create_aggregator(config)
+
+        # v6: Window Positional Embeddings to break symmetry
+        # Each window position gets a unique embedding to differentiate
+        # windows with similar statistics from the same sequence
+        self.num_windows = config.num_windows
+        self.window_embed = nn.Embedding(config.num_windows, config.input_dim)
         
         # Output projection to K_CG, V_CG
         if config.output_projection:
@@ -158,6 +164,7 @@ class Sidecar(nn.Module):
         Args:
             kv_window: Input tensor of shape (batch, window_size, 2*d_head).
                        Contains concatenated [K, V] vectors for each position.
+                       For multi-window training, batch = B_real * num_windows.
             attention_mask: Optional mask of shape (batch, window_size).
                            1 for valid positions, 0 for padding.
             return_split: If True, return (K_CG, V_CG) as separate tensors.
@@ -174,7 +181,31 @@ class Sidecar(nn.Module):
         assert input_dim == self.config.input_dim, (
             f"Expected input dim {self.config.input_dim}, got {input_dim}"
         )
-        
+
+        # v6: Inject Window Positional Embeddings (WPE)
+        # This breaks the symmetry trap where all windows produce identical outputs
+        # because they go through the same network weights with similar statistics.
+        #
+        # Shape transformation:
+        #   Input: (B_total, L_win, D) where B_total = B_real * num_windows
+        #   Unfold: (B_real, num_windows, L_win, D)
+        #   Add WPE: Input + P[window_idx] for each window
+        #   Refold: (B_total, L_win, D)
+        if self.num_windows > 1 and batch_size % self.num_windows == 0:
+            B_real = batch_size // self.num_windows
+
+            # Unfold to separate windows
+            kv_window = kv_window.view(B_real, self.num_windows, seq_len, input_dim)
+
+            # Add window positional embeddings
+            # window_embed.weight: (num_windows, input_dim)
+            # Unsqueeze to broadcast over L_win: (1, num_windows, 1, input_dim)
+            w_emb = self.window_embed.weight.unsqueeze(0).unsqueeze(2)
+            kv_window = kv_window + w_emb
+
+            # Refold back to (B_total, L_win, D)
+            kv_window = kv_window.view(batch_size, seq_len, input_dim)
+
         # Encode: capture intra-window dependencies
         # (batch, window_size, 2*d_head) -> (batch, window_size, encoder_hidden_dim)
         encoded = self.encoder(kv_window, attention_mask)

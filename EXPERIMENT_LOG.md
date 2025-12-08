@@ -889,3 +889,203 @@ diversity_weight = 0.5         # RE-ENABLE: prevent token collapse
 **Key insight:** Manifold constraint + Diversity are BOTH required.
 - Hard projection handles manifold (scale)
 - Diversity loss handles direction differentiation
+
+---
+
+# EXPERIMENT v5: Hard Projection + Diversity Loss
+**Date:** 2024-12-08
+**WandB:** fmkv_v5_diversity
+
+## 1. Protocol
+
+Following v4's success with manifold (but failure with diversity), v5 adds:
+
+1. **Keep Hard Projection** (from v4)
+2. **Re-enable diversity loss**: `diversity_weight = 0.1`
+3. **Orthogonal initialization** for pooling seeds and inducing points
+
+## 2. Results
+
+**Training:** 2200 steps, batch_size=512, lr=1e-4
+
+### Manifold Metrics (Still Perfect)
+```
+K ratio: 1.0000 (target: 1.0) ✓
+V ratio: 1.0000 (target: 1.0) ✓
+```
+
+### Diversity Metrics (STILL COLLAPSED!)
+```
+K pairwise cos sim: 0.9982 (target: < 0.5, v4 was 0.998)
+Diversity loss:     0.9963 (high but not effective!)
+```
+
+### Jacobian Metrics (WORSE THAN v4!)
+```
+Jacobian cosine_sim: 0.0295 (target: > 0.5, v4 was 0.059)
+Jacobian ratio:      0.0110 (target: ~1.0, v4 was 0.012)
+CG Jacobian norm:    0.0003 (collapsed to zero)
+```
+
+## 3. Analysis
+
+### What Happened
+- Diversity loss IS being computed (0.9963 is near-maximum)
+- But the loss did NOT prevent token collapse
+- Jacobian actually got WORSE than v4
+
+### Root Cause: Architectural Flaw
+The real problem: **Each window is processed INDEPENDENTLY by the Sidecar**.
+
+```
+Window 1 → Sidecar → Super-token 1
+Window 2 → Sidecar → Super-token 2  ← SAME WEIGHTS
+Window 3 → Sidecar → Super-token 3  ← SAME WEIGHTS
+Window 4 → Sidecar → Super-token 4  ← SAME WEIGHTS
+```
+
+If all windows have similar statistics (they're from the same sequence), and they go through the same network weights, they will produce similar outputs regardless of the loss function.
+
+The diversity loss only penalizes AFTER the super-tokens are computed, but by then they're already collapsed.
+
+### Why Diversity Loss Failed
+1. **Loss is reactive, not preventive**: It penalizes similar outputs, but the architecture produces them anyway
+2. **Gradient flow**: The diversity gradient must flow back through the Sidecar to change weights, but the primary signal (force_direction) is 10x stronger
+3. **Weight = 0.1 is too small**: Diversity loss is 0.9963, but force loss is also ~1.0, so diversity contributes only 0.1 to total loss
+
+## 4. Comparison Table
+
+| Version | Manifold | Diversity (cos sim) | Jacobian cos | Status |
+|---------|----------|---------------------|--------------|--------|
+| v1 | Collapsed | N/A | Collapsed | FAIL |
+| v2 | Exploded (24x) | N/A | Exploded | FAIL |
+| v3 | Exploded (105x) | N/A | Orthogonal | FAIL |
+| v4 | **PERFECT** | Collapsed (0.998) | Collapsed (0.059) | PARTIAL |
+| **v5** | **PERFECT** | Collapsed (0.998) | Collapsed (0.030) | FAIL |
+
+## 5. v6 Proposals
+
+### Option A: Higher Diversity Weight
+```python
+diversity_weight = 2.0  # Instead of 0.1
+```
+Risk: May destabilize training
+
+### Option B: Window-Aware Architecture
+Modify Sidecar to see ALL windows at once, not process them independently.
+```python
+# Instead of processing each window separately:
+k_cg_all = sidecar.compress_batch(keys_all_windows)  # (batch, num_windows, d)
+# The Sidecar internally uses cross-window attention to ensure diversity
+```
+
+### Option C: Contrastive Diversity Loss
+Use InfoNCE-style loss that explicitly pushes apart same-sample super-tokens:
+```python
+# For each super-token, other tokens from same sample are negatives
+L_contrastive = -log(exp(sim_to_dense) / sum(exp(sim_to_all_tokens)))
+```
+
+### Option D: Per-Window Unique Initialization
+Give each window position a unique positional encoding BEFORE the Sidecar:
+```python
+# Add window position embedding
+window_pos = self.window_pos_embed(window_idx)  # Different for each window
+kv_window = kv_window + window_pos
+```
+
+### Recommendation: Try Option A first (simplest), then Option D if it fails.
+
+---
+
+# EXPERIMENT v6: Temporal Anchoring & Diversity
+**Date:** 2024-12-08
+**WandB:** fmkv_v6_temporal
+
+## 1. Diagnosis: The Symmetry Trap
+
+v5 failed because the Sidecar is **Translation Invariant**:
+- Input: Four windows W_1, W_2, W_3, W_4
+- Process: Each window processed independently: k_i = f_θ(W_i)
+- Issue: Adjacent windows have highly correlated local statistics
+- Without a "Time" signal, f_θ(W_1) ≈ f_θ(W_2) even with diversity loss
+- Result: Architecture lacks input features to differentiate windows
+
+## 2. Protocol: Window Positional Embeddings (WPE)
+
+Break symmetry at the **INPUT** level, not just the loss level.
+
+### 2.1 Architectural Change
+```python
+class Sidecar(nn.Module):
+    def __init__(self, config):
+        # ... existing init ...
+        self.num_windows = config.num_windows  # Default: 4
+        self.window_embed = nn.Embedding(num_windows, input_dim)
+
+    def forward(self, x):
+        # x: [B_total, Window_Len, D] where B_total = B_real * num_windows
+
+        # 1. Unfold to separate windows
+        B_real = B_total // self.num_windows
+        x = x.view(B_real, self.num_windows, -1, self.hidden_dim)
+
+        # 2. Add Window Positional Embeddings
+        # w_emb: (1, num_windows, 1, D) broadcasts over Window_Len
+        w_emb = self.window_embed.weight.unsqueeze(0).unsqueeze(2)
+        x = x + w_emb
+
+        # 3. Refold
+        x = x.view(B_total, -1, self.hidden_dim)
+
+        # ... proceed with Encoder and Hard Projection ...
+```
+
+**Effect:** Even if Window 1 and Window 2 contain identical text, their inputs are now vectorially distinct: `X + P_1 ≠ X + P_2`
+
+### 2.2 Loss Function
+```python
+L_v6 = L_force_cos + L_consistency + 10.0 * L_diversity
+```
+
+**Hyperparameters:**
+- `force_direction_weight`: 1.0
+- `consistency_weight`: 1.0
+- `diversity_weight`: **10.0** (was 0.1 in v5 - aggressive repulsion)
+- **Hard Projection**: ENABLED (from v4)
+
+## 3. Files Modified
+
+1. **`src/fmkv/sidecar/config.py`**
+   - Added `num_windows: int = 4` to SidecarConfig
+
+2. **`src/fmkv/sidecar/network.py`**
+   - Added `self.window_embed = nn.Embedding(num_windows, input_dim)`
+   - Modified `forward()` to inject WPE before encoding
+
+3. **`src/fmkv/losses/force_matching.py`**
+   - Updated `diversity_weight` from 0.1 to 10.0
+   - Updated docstring with v6 protocol explanation
+
+## 4. Results
+
+*Pending - waiting for training run*
+
+### Expected Targets
+```
+K ratio: 1.0000 (target: 1.0) - should stay perfect from v4
+V ratio: 1.0000 (target: 1.0) - should stay perfect from v4
+K pairwise cos sim: < 0.5 (target: diverse, was 0.998 in v5)
+Jacobian cosine_sim: > 0.5 (target: aligned, was 0.03 in v5)
+```
+
+## 5. Comparison Table (Updated After Results)
+
+| Version | Manifold | Diversity (cos sim) | Jacobian cos | Status |
+|---------|----------|---------------------|--------------|--------|
+| v1 | Collapsed | N/A | Collapsed | FAIL |
+| v2 | Exploded (24x) | N/A | Exploded | FAIL |
+| v3 | Exploded (105x) | N/A | Orthogonal | FAIL |
+| v4 | **PERFECT** | Collapsed (0.998) | Collapsed (0.059) | PARTIAL |
+| v5 | **PERFECT** | Collapsed (0.998) | Collapsed (0.030) | FAIL |
+| **v6** | TBD | TBD | TBD | PENDING |

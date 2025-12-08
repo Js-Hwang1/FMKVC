@@ -38,21 +38,32 @@ from fmkv.losses.jacobian import (
 class ForceMatchingLossConfig:
     """Configuration for Force Matching Loss.
 
-    v5 Protocol: Hard Manifold Projection + Diversity
-    ==================================================
+    v6 Protocol: Temporal Anchoring & Diversity
+    ===========================================
 
     v1: force=0.0 (disabled) -> Jacobian collapse (ratio=0.02)
     v2: force=10.0, norm=0.1 -> Scale explosion (ratio=24.25)
     v3: direction=5.0, magnitude=1.0, manifold=2.0 -> WORSE explosion (ratio=105.5)
     v4: hard projection, diversity=0.0 -> Manifold fixed, but TOKEN COLLAPSE (cos_sim=0.998)
+    v5: hard projection, diversity=0.1 -> STILL COLLAPSED (0.998), WORSE Jacobian
 
-    v5 Fix: Keep hard projection + RE-ENABLE diversity loss
+    v6 Fix: Window Positional Embeddings (WPE) + Aggressive Diversity
     - Hard projection layer in Sidecar: ||K_cg|| = R_K, ||V_cg|| = R_V (from v4)
-    - Re-enable diversity loss to break symmetry between super-tokens
-    - If all tokens identical -> uniform softmax -> zero Jacobian
+    - Window Positional Embeddings: Break symmetry at INPUT level (NEW!)
+      Each window gets unique embedding P_j added before encoding: Input_ij = KV_ij + P_j
+    - Aggressive diversity weight: 10.0 (was 0.1 in v5)
+
+    Why v5 Failed:
+        The Sidecar is translation invariant - each window processed independently with same weights.
+        Even with diversity loss, architecture lacks input features to differentiate windows.
+        Loss is reactive (penalizes similar outputs), but architecture produces them anyway.
+
+    v6 Solution:
+        Break symmetry at INPUT level with learnable window position embeddings.
+        Even if Window 1 and Window 2 have identical text: X + P_1 ≠ X + P_2
 
     Loss function:
-        L_v5 = L_force_cos + L_consistency + lambda_div * L_diversity
+        L_v6 = L_force_cos + L_consistency + 10.0 * L_diversity
         where L_diversity = sum(cos_sim(k_i, k_j)^2) for i != j
     """
 
@@ -74,12 +85,12 @@ class ForceMatchingLossConfig:
 
     # === ALL OTHER WEIGHTS SET TO 0.0 (v4 uses hard projection instead) ===
 
-    # v5 weights - Re-enable diversity to break symmetry
+    # v6 weights - Window Positional Embeddings + Aggressive Diversity
     force_magnitude_weight: float = 0.0  # Hard projection ensures ||K_cg|| = R_K
     manifold_weight: float = 0.0  # Hard projection ensures manifold constraint
     output_magnitude_weight: float = 0.0  # Not needed with hard projection
     kv_match_weight: float = 0.0  # Not needed - we match Jacobians directly
-    diversity_weight: float = 0.1  # v5: RE-ENABLED to break symmetry (prevent token collapse)
+    diversity_weight: float = 10.0  # v6: AGGRESSIVE diversity (was 0.1 in v5)
 
     # Legacy v2 weights - DISABLED
     force_matching_weight: float = 0.0
