@@ -38,22 +38,22 @@ from fmkv.losses.jacobian import (
 class ForceMatchingLossConfig:
     """Configuration for Force Matching Loss.
 
-    v4 Protocol: Hard Manifold Projection
-    ======================================
+    v5 Protocol: Hard Manifold Projection + Diversity
+    ==================================================
 
     v1: force=0.0 (disabled) -> Jacobian collapse (ratio=0.02)
     v2: force=10.0, norm=0.1 -> Scale explosion (ratio=24.25)
     v3: direction=5.0, magnitude=1.0, manifold=2.0 -> WORSE explosion (ratio=105.5)
-        Problem: anti_collapse penalty dominated loss (65%), driving explosion
+    v4: hard projection, diversity=0.0 -> Manifold fixed, but TOKEN COLLAPSE (cos_sim=0.998)
 
-    v4 Fix: ARCHITECTURAL enforcement of manifold constraint
-    - Hard projection layer in Sidecar: ||K_cg|| = R_K, ||V_cg|| = R_V
-    - Remove ALL regularization losses (manifold, anti_collapse, magnitude, etc.)
-    - Keep ONLY: L_force_cos + lambda * L_consistency
+    v5 Fix: Keep hard projection + RE-ENABLE diversity loss
+    - Hard projection layer in Sidecar: ||K_cg|| = R_K, ||V_cg|| = R_V (from v4)
+    - Re-enable diversity loss to break symmetry between super-tokens
+    - If all tokens identical -> uniform softmax -> zero Jacobian
 
     Loss function:
-        L_v4 = L_force_cos + lambda * L_consistency
-        where L_force_cos = 1 - cos(J_dense, J_cg)
+        L_v5 = L_force_cos + L_consistency + lambda_div * L_diversity
+        where L_diversity = sum(cos_sim(k_i, k_j)^2) for i != j
     """
 
     # Number of future queries to sample for force matching
@@ -74,12 +74,12 @@ class ForceMatchingLossConfig:
 
     # === ALL OTHER WEIGHTS SET TO 0.0 (v4 uses hard projection instead) ===
 
-    # v3 weights - DISABLED (now handled by hard projection)
+    # v5 weights - Re-enable diversity to break symmetry
     force_magnitude_weight: float = 0.0  # Hard projection ensures ||K_cg|| = R_K
     manifold_weight: float = 0.0  # Hard projection ensures manifold constraint
     output_magnitude_weight: float = 0.0  # Not needed with hard projection
     kv_match_weight: float = 0.0  # Not needed - we match Jacobians directly
-    diversity_weight: float = 0.0  # Let network learn diversity naturally
+    diversity_weight: float = 0.1  # v5: RE-ENABLED to break symmetry (prevent token collapse)
 
     # Legacy v2 weights - DISABLED
     force_matching_weight: float = 0.0

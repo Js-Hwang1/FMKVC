@@ -799,3 +799,93 @@ if k_cg.norm() > k_dense.norm() * 1.5:
 | v4 (target) | Balanced | ~1.0 | ~19.1 | ~1.9 |
 
 **Next step:** Implement hard normalization in the Sidecar architecture to guarantee norm matching, then disable anti-collapse penalty.
+
+---
+
+# EXPERIMENT v4: Hard Manifold Projection
+**Date:** 2024-12-07
+**WandB:** fmkv_v4_hard_projection
+
+## 1. Protocol
+
+Following the reasoning agent's recommendation, v4 implements:
+
+1. **Hard Projection Layer** (architectural fix):
+   ```python
+   R_K = keys.norm(dim=-1).mean(dim=-1, keepdim=True)
+   R_V = values.norm(dim=-1).mean(dim=-1, keepdim=True)
+   k_cg = R_K * (k_raw / (k_raw.norm(dim=-1, keepdim=True) + 1e-8))
+   v_cg = R_V * (v_raw / (v_raw.norm(dim=-1, keepdim=True) + 1e-8))
+   ```
+
+2. **Minimal Loss Function**:
+   - `force_direction_weight = 1.0`
+   - `consistency_weight = 1.0`
+   - All other weights = 0.0 (manifold, diversity, anti_collapse, etc.)
+
+## 2. Results
+
+**Training:** 2200 steps, batch_size=512, lr=1e-4
+
+### Manifold Metrics (FIXED!)
+```
+K ratio: 1.0000 (target: 1.0) ✓ PERFECT
+V ratio: 1.0000 (target: 1.0) ✓ PERFECT
+```
+
+### Jacobian Metrics (FAILED - New Collapse Mode)
+```
+Jacobian cosine_sim: 0.0591 (target: 1.0) ✗
+Jacobian ratio:      0.0125 (target: 1.0) ✗
+Dense Jacobian norm: 0.0249
+CG Jacobian norm:    0.0003  ← COLLAPSED TO ZERO
+```
+
+### Diversity Metrics (ROOT CAUSE)
+```
+K super-token pairwise cos sim: 0.9981 ← ALL 4 TOKENS IDENTICAL!
+```
+
+## 3. Analysis
+
+### What Worked
+- **Hard projection perfectly enforces manifold constraint**
+- K ratio and V ratio are exactly 1.0 by construction
+
+### What Failed
+- **Super-token diversity collapsed** - All 4 output tokens are nearly identical (cos_sim = 0.998)
+- When tokens are identical, softmax becomes uniform distribution
+- Uniform attention → zero Jacobian gradient → can't learn steering
+
+### Root Cause Chain
+1. Removed diversity_weight (set to 0.0) as per v4 protocol
+2. Network has no incentive to produce diverse super-tokens
+3. Identical tokens → trivial attention → zero Jacobian
+4. Force direction loss = 1.0 (orthogonal) but gradients vanish
+
+## 4. Comparison Table
+
+| Version | Manifold | Diversity | Jacobian | Status |
+|---------|----------|-----------|----------|--------|
+| v1 | Collapsed (0.02) | N/A | Collapsed | FAIL |
+| v2 | Exploded (24x) | N/A | Exploded | FAIL |
+| v3 | Exploded (105x) | N/A | Orthogonal | FAIL |
+| **v4** | **PERFECT (1.0)** | Collapsed (0.998) | Collapsed | PARTIAL |
+
+## 5. v5 Proposal
+
+Keep hard projection (it works!), but re-enable diversity:
+
+```python
+# v5 Loss Weights
+force_direction_weight = 1.0  # Primary objective
+consistency_weight = 1.0       # Validation
+diversity_weight = 0.5         # RE-ENABLE: prevent token collapse
+
+# Keep hard projection in architecture
+# All other weights remain 0.0
+```
+
+**Key insight:** Manifold constraint + Diversity are BOTH required.
+- Hard projection handles manifold (scale)
+- Diversity loss handles direction differentiation

@@ -147,14 +147,16 @@ class SetAttentionBlock(nn.Module):
 class InducedSetAttentionBlock(nn.Module):
     """
     Induced Set Attention Block (ISAB) from "Set Transformer" paper.
-    
+
     Uses inducing points to reduce attention complexity from O(n^2) to O(nm),
     where m is the number of inducing points.
-    
+
     ISAB(X) = MAB(X, MAB(I, X))
     where MAB(X, Y) = LayerNorm(X + MHA(X, Y, Y))
+
+    v5 Fix: Inducing points are initialized orthogonally to encourage diverse representations.
     """
-    
+
     def __init__(
         self,
         d_model: int,
@@ -164,9 +166,13 @@ class InducedSetAttentionBlock(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-        
-        # Learnable inducing points
-        self.inducing_points = nn.Parameter(torch.randn(1, num_inducing, d_model) * 0.5)
+
+        # v5: Learnable inducing points with orthogonal initialization
+        self.inducing_points = nn.Parameter(torch.empty(1, num_inducing, d_model))
+        if num_inducing > 1 and num_inducing <= d_model:
+            nn.init.orthogonal_(self.inducing_points.squeeze(0))
+        else:
+            nn.init.normal_(self.inducing_points, mean=0.0, std=0.5)
         
         # First attention: inducing points attend to input
         self.norm1 = nn.LayerNorm(d_model)
@@ -225,11 +231,14 @@ class InducedSetAttentionBlock(nn.Module):
 class PoolingByMultiheadAttention(nn.Module):
     """
     Pooling by Multihead Attention (PMA) from "Set Transformer" paper.
-    
+
     Uses learnable seed vectors to pool set elements into fixed-size output.
     PMA(X) = MAB(S, X) where S are learnable seed vectors.
+
+    v5 Fix: Seeds are initialized orthogonally to break symmetry and encourage
+    the network to produce diverse super-tokens from the start.
     """
-    
+
     def __init__(
         self,
         d_model: int,
@@ -239,11 +248,18 @@ class PoolingByMultiheadAttention(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-        
+
         self.num_outputs = num_outputs
-        
-        # Learnable seed vectors for pooling
-        self.seeds = nn.Parameter(torch.randn(1, num_outputs, d_model) * 0.5)
+
+        # v5: Learnable seed vectors with orthogonal initialization
+        # Orthogonal init breaks symmetry and encourages diverse outputs
+        self.seeds = nn.Parameter(torch.empty(1, num_outputs, d_model))
+        if num_outputs > 1 and num_outputs <= d_model:
+            # Use orthogonal init when we have multiple seeds
+            nn.init.orthogonal_(self.seeds.squeeze(0))
+        else:
+            # Fallback for single seed or when num_outputs > d_model
+            nn.init.normal_(self.seeds, mean=0.0, std=0.5)
         
         # Attention from seeds to input
         self.norm1 = nn.LayerNorm(d_model)
